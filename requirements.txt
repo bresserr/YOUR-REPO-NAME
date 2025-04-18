@@ -16,3 +16,4 @@ einops
 opencv-contrib-python
 safetensors
 huggingface_hub
+spaces

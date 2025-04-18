@@ -2,10 +2,26 @@
 
 
 import torch
+import os
 
+# 检查是否在Hugging Face Space环境中
+IN_HF_SPACE = os.environ.get('SPACE_ID') is not None
 
+# 设置CPU设备
 cpu = torch.device('cpu')
-gpu = torch.device(f'cuda:{torch.cuda.current_device()}')
+
+# 尝试设置GPU设备，如果不可用则回退到CPU
+try:
+    if torch.cuda.is_available():
+        gpu = torch.device(f'cuda:{torch.cuda.current_device()}')
+    else:
+        print("CUDA不可用，使用CPU作为默认设备")
+        gpu = torch.device('cpu')
+except Exception as e:
+    print(f"初始化CUDA设备时出错: {e}")
+    print("回退到CPU设备")
+    gpu = torch.device('cpu')
+
 gpu_complete_modules = []
 
 
@@ -71,18 +87,33 @@ def fake_diffusers_current_device(model: torch.nn.Module, target_device: torch.d
 def get_cuda_free_memory_gb(device=None):
     if device is None:
         device = gpu
-
-    memory_stats = torch.cuda.memory_stats(device)
-    bytes_active = memory_stats['active_bytes.all.current']
-    bytes_reserved = memory_stats['reserved_bytes.all.current']
-    bytes_free_cuda, _ = torch.cuda.mem_get_info(device)
-    bytes_inactive_reserved = bytes_reserved - bytes_active
-    bytes_total_available = bytes_free_cuda + bytes_inactive_reserved
-    return bytes_total_available / (1024 ** 3)
+    
+    # 如果不是CUDA设备，返回默认值
+    if device.type != 'cuda':
+        print("无法获取非CUDA设备的内存信息，返回默认值")
+        return 6.0  # 返回一个默认值
+    
+    try:
+        memory_stats = torch.cuda.memory_stats(device)
+        bytes_active = memory_stats['active_bytes.all.current']
+        bytes_reserved = memory_stats['reserved_bytes.all.current']
+        bytes_free_cuda, _ = torch.cuda.mem_get_info(device)
+        bytes_inactive_reserved = bytes_reserved - bytes_active
+        bytes_total_available = bytes_free_cuda + bytes_inactive_reserved
+        return bytes_total_available / (1024 ** 3)
+    except Exception as e:
+        print(f"获取CUDA内存信息时出错: {e}")
+        return 6.0  # 返回一个默认值
 
 
 def move_model_to_device_with_memory_preservation(model, target_device, preserved_memory_gb=0):
     print(f'Moving {model.__class__.__name__} to {target_device} with preserved memory: {preserved_memory_gb} GB')
+
+    # 如果目标设备是CPU或当前在CPU上，直接移动
+    if target_device.type == 'cpu' or gpu.type == 'cpu':
+        model.to(device=target_device)
+        torch.cuda.empty_cache() if torch.cuda.is_available() else None
+        return
 
     for m in model.modules():
         if get_cuda_free_memory_gb(target_device) <= preserved_memory_gb:
@@ -99,6 +130,12 @@ def move_model_to_device_with_memory_preservation(model, target_device, preserve
 
 def offload_model_from_device_for_memory_preservation(model, target_device, preserved_memory_gb=0):
     print(f'Offloading {model.__class__.__name__} from {target_device} to preserve memory: {preserved_memory_gb} GB')
+
+    # 如果目标设备是CPU或当前在CPU上，直接处理
+    if target_device.type == 'cpu' or gpu.type == 'cpu':
+        model.to(device=cpu)
+        torch.cuda.empty_cache() if torch.cuda.is_available() else None
+        return
 
     for m in model.modules():
         if get_cuda_free_memory_gb(target_device) >= preserved_memory_gb:
@@ -119,7 +156,7 @@ def unload_complete_models(*args):
         print(f'Unloaded {m.__class__.__name__} as complete.')
 
     gpu_complete_modules.clear()
-    torch.cuda.empty_cache()
+    torch.cuda.empty_cache() if torch.cuda.is_available() else None
     return
 
 

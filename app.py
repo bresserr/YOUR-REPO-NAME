@@ -12,6 +12,17 @@ import safetensors.torch as sf
 import numpy as np
 import math
 
+# 检查是否在Hugging Face Space环境中
+IN_HF_SPACE = os.environ.get('SPACE_ID') is not None
+
+# 如果在Hugging Face Space中，导入spaces模块
+if IN_HF_SPACE:
+    try:
+        import spaces
+        print("在Hugging Face Space环境中运行，已导入spaces模块")
+    except ImportError:
+        print("未能导入spaces模块，可能不在Hugging Face Space环境中")
+
 from PIL import Image
 from diffusers import AutoencoderKLHunyuanVideo
 from transformers import LlamaModel, CLIPTextModel, LlamaTokenizerFast, CLIPTokenizer
@@ -27,59 +38,86 @@ from diffusers_helper.clip_vision import hf_clip_vision_encode
 from diffusers_helper.bucket_tools import find_nearest_bucket
 
 # 获取可用的CUDA内存
-free_mem_gb = get_cuda_free_memory_gb(gpu)
-high_vram = free_mem_gb > 60
+try:
+    if torch.cuda.is_available():
+        free_mem_gb = get_cuda_free_memory_gb(gpu)
+        print(f'Free VRAM {free_mem_gb} GB')
+    else:
+        free_mem_gb = 6.0  # 默认值
+        print("CUDA不可用，使用默认的内存设置")
+except Exception as e:
+    free_mem_gb = 6.0  # 默认值
+    print(f"获取CUDA内存时出错: {e}，使用默认的内存设置")
 
-print(f'Free VRAM {free_mem_gb} GB')
+high_vram = free_mem_gb > 60
 print(f'High-VRAM Mode: {high_vram}')
 
-# 加载模型
-text_encoder = LlamaModel.from_pretrained("hunyuanvideo-community/HunyuanVideo", subfolder='text_encoder', torch_dtype=torch.float16).cpu()
-text_encoder_2 = CLIPTextModel.from_pretrained("hunyuanvideo-community/HunyuanVideo", subfolder='text_encoder_2', torch_dtype=torch.float16).cpu()
-tokenizer = LlamaTokenizerFast.from_pretrained("hunyuanvideo-community/HunyuanVideo", subfolder='tokenizer')
-tokenizer_2 = CLIPTokenizer.from_pretrained("hunyuanvideo-community/HunyuanVideo", subfolder='tokenizer_2')
-vae = AutoencoderKLHunyuanVideo.from_pretrained("hunyuanvideo-community/HunyuanVideo", subfolder='vae', torch_dtype=torch.float16).cpu()
+# 使用加载模型的函数
+def load_models():
+    print("开始加载模型...")
+    
+    # 加载模型
+    text_encoder = LlamaModel.from_pretrained("hunyuanvideo-community/HunyuanVideo", subfolder='text_encoder', torch_dtype=torch.float16).cpu()
+    text_encoder_2 = CLIPTextModel.from_pretrained("hunyuanvideo-community/HunyuanVideo", subfolder='text_encoder_2', torch_dtype=torch.float16).cpu()
+    tokenizer = LlamaTokenizerFast.from_pretrained("hunyuanvideo-community/HunyuanVideo", subfolder='tokenizer')
+    tokenizer_2 = CLIPTokenizer.from_pretrained("hunyuanvideo-community/HunyuanVideo", subfolder='tokenizer_2')
+    vae = AutoencoderKLHunyuanVideo.from_pretrained("hunyuanvideo-community/HunyuanVideo", subfolder='vae', torch_dtype=torch.float16).cpu()
 
-feature_extractor = SiglipImageProcessor.from_pretrained("lllyasviel/flux_redux_bfl", subfolder='feature_extractor')
-image_encoder = SiglipVisionModel.from_pretrained("lllyasviel/flux_redux_bfl", subfolder='image_encoder', torch_dtype=torch.float16).cpu()
+    feature_extractor = SiglipImageProcessor.from_pretrained("lllyasviel/flux_redux_bfl", subfolder='feature_extractor')
+    image_encoder = SiglipVisionModel.from_pretrained("lllyasviel/flux_redux_bfl", subfolder='image_encoder', torch_dtype=torch.float16).cpu()
 
-transformer = HunyuanVideoTransformer3DModelPacked.from_pretrained('lllyasviel/FramePackI2V_HY', torch_dtype=torch.bfloat16).cpu()
+    transformer = HunyuanVideoTransformer3DModelPacked.from_pretrained('lllyasviel/FramePackI2V_HY', torch_dtype=torch.bfloat16).cpu()
 
-vae.eval()
-text_encoder.eval()
-text_encoder_2.eval()
-image_encoder.eval()
-transformer.eval()
+    vae.eval()
+    text_encoder.eval()
+    text_encoder_2.eval()
+    image_encoder.eval()
+    transformer.eval()
 
-if not high_vram:
-    vae.enable_slicing()
-    vae.enable_tiling()
+    if not high_vram:
+        vae.enable_slicing()
+        vae.enable_tiling()
 
-transformer.high_quality_fp32_output_for_inference = True
-print('transformer.high_quality_fp32_output_for_inference = True')
+    transformer.high_quality_fp32_output_for_inference = True
+    print('transformer.high_quality_fp32_output_for_inference = True')
 
-transformer.to(dtype=torch.bfloat16)
-vae.to(dtype=torch.float16)
-image_encoder.to(dtype=torch.float16)
-text_encoder.to(dtype=torch.float16)
-text_encoder_2.to(dtype=torch.float16)
+    transformer.to(dtype=torch.bfloat16)
+    vae.to(dtype=torch.float16)
+    image_encoder.to(dtype=torch.float16)
+    text_encoder.to(dtype=torch.float16)
+    text_encoder_2.to(dtype=torch.float16)
 
-vae.requires_grad_(False)
-text_encoder.requires_grad_(False)
-text_encoder_2.requires_grad_(False)
-image_encoder.requires_grad_(False)
-transformer.requires_grad_(False)
+    vae.requires_grad_(False)
+    text_encoder.requires_grad_(False)
+    text_encoder_2.requires_grad_(False)
+    image_encoder.requires_grad_(False)
+    transformer.requires_grad_(False)
 
-if not high_vram:
-    # DynamicSwapInstaller is same as huggingface's enable_sequential_offload but 3x faster
-    DynamicSwapInstaller.install_model(transformer, device=gpu)
-    DynamicSwapInstaller.install_model(text_encoder, device=gpu)
+    if torch.cuda.is_available() and gpu.type == 'cuda':
+        if not high_vram:
+            # DynamicSwapInstaller is same as huggingface's enable_sequential_offload but 3x faster
+            DynamicSwapInstaller.install_model(transformer, device=gpu)
+            DynamicSwapInstaller.install_model(text_encoder, device=gpu)
+        else:
+            text_encoder.to(gpu)
+            text_encoder_2.to(gpu)
+            image_encoder.to(gpu)
+            vae.to(gpu)
+            transformer.to(gpu)
+    
+    return text_encoder, text_encoder_2, tokenizer, tokenizer_2, vae, feature_extractor, image_encoder, transformer
+
+# 使用Hugging Face Spaces GPU装饰器
+if IN_HF_SPACE and 'spaces' in globals():
+    @spaces.GPU
+    def load_models_with_gpu():
+        return load_models()
+    
+    print("使用@spaces.GPU装饰器加载模型")
+    text_encoder, text_encoder_2, tokenizer, tokenizer_2, vae, feature_extractor, image_encoder, transformer = load_models_with_gpu()
 else:
-    text_encoder.to(gpu)
-    text_encoder_2.to(gpu)
-    image_encoder.to(gpu)
-    vae.to(gpu)
-    transformer.to(gpu)
+    print("不使用@spaces.GPU装饰器，直接加载模型")
+    text_encoder, text_encoder_2, tokenizer, tokenizer_2, vae, feature_extractor, image_encoder, transformer = load_models()
 
 stream = AsyncStream()
 
@@ -303,32 +341,64 @@ def worker(input_image, prompt, n_prompt, seed, total_second_length, latent_wind
     return
 
 
-def process(input_image, prompt, n_prompt, seed, total_second_length, latent_window_size, steps, cfg, gs, rs, gpu_memory_preservation, use_teacache):
-    global stream
-    assert input_image is not None, 'No input image!'
+# 使用Hugging Face Spaces GPU装饰器处理进程函数
+if IN_HF_SPACE and 'spaces' in globals():
+    @spaces.GPU
+    def process_with_gpu(input_image, prompt, n_prompt, seed, total_second_length, latent_window_size, steps, cfg, gs, rs, gpu_memory_preservation, use_teacache):
+        global stream
+        assert input_image is not None, 'No input image!'
 
-    yield None, None, '', '', gr.update(interactive=False), gr.update(interactive=True)
+        yield None, None, '', '', gr.update(interactive=False), gr.update(interactive=True)
 
-    stream = AsyncStream()
+        stream = AsyncStream()
 
-    async_run(worker, input_image, prompt, n_prompt, seed, total_second_length, latent_window_size, steps, cfg, gs, rs, gpu_memory_preservation, use_teacache)
+        async_run(worker, input_image, prompt, n_prompt, seed, total_second_length, latent_window_size, steps, cfg, gs, rs, gpu_memory_preservation, use_teacache)
 
-    output_filename = None
+        output_filename = None
 
-    while True:
-        flag, data = stream.output_queue.next()
+        while True:
+            flag, data = stream.output_queue.next()
 
-        if flag == 'file':
-            output_filename = data
-            yield output_filename, gr.update(), gr.update(), gr.update(), gr.update(interactive=False), gr.update(interactive=True)
+            if flag == 'file':
+                output_filename = data
+                yield output_filename, gr.update(), gr.update(), gr.update(), gr.update(interactive=False), gr.update(interactive=True)
 
-        if flag == 'progress':
-            preview, desc, html = data
-            yield gr.update(), gr.update(visible=True, value=preview), desc, html, gr.update(interactive=False), gr.update(interactive=True)
+            if flag == 'progress':
+                preview, desc, html = data
+                yield gr.update(), gr.update(visible=True, value=preview), desc, html, gr.update(interactive=False), gr.update(interactive=True)
 
-        if flag == 'end':
-            yield output_filename, gr.update(visible=False), gr.update(), '', gr.update(interactive=True), gr.update(interactive=False)
-            break
+            if flag == 'end':
+                yield output_filename, gr.update(visible=False), gr.update(), '', gr.update(interactive=True), gr.update(interactive=False)
+                break
+    
+    process = process_with_gpu
+else:
+    def process(input_image, prompt, n_prompt, seed, total_second_length, latent_window_size, steps, cfg, gs, rs, gpu_memory_preservation, use_teacache):
+        global stream
+        assert input_image is not None, 'No input image!'
+
+        yield None, None, '', '', gr.update(interactive=False), gr.update(interactive=True)
+
+        stream = AsyncStream()
+
+        async_run(worker, input_image, prompt, n_prompt, seed, total_second_length, latent_window_size, steps, cfg, gs, rs, gpu_memory_preservation, use_teacache)
+
+        output_filename = None
+
+        while True:
+            flag, data = stream.output_queue.next()
+
+            if flag == 'file':
+                output_filename = data
+                yield output_filename, gr.update(), gr.update(), gr.update(), gr.update(interactive=False), gr.update(interactive=True)
+
+            if flag == 'progress':
+                preview, desc, html = data
+                yield gr.update(), gr.update(visible=True, value=preview), desc, html, gr.update(interactive=False), gr.update(interactive=True)
+
+            if flag == 'end':
+                yield output_filename, gr.update(visible=False), gr.update(), '', gr.update(interactive=True), gr.update(interactive=False)
+                break
 
 
 def end_process():
