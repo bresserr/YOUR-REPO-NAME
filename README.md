@@ -1,3 +1,15 @@
+---
+title: FramePack图像到视频生成
+emoji: 🎬
+colorFrom: indigo
+colorTo: purple
+sdk: gradio
+sdk_version: 5.23.0
+app_file: app.py
+pinned: false
+license: mit
+---
+
 # FramePack
 
 FramePack是一个图像到视频生成工具，利用扩散模型将静态图像转换为动态视频。
