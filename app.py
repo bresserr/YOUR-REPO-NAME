@@ -30,30 +30,46 @@ from diffusers_helper.hunyuan import encode_prompt_conds, vae_decode, vae_encode
 from diffusers_helper.utils import save_bcthw_as_mp4, crop_or_pad_yield_mask, soft_append_bcthw, resize_and_center_crop, state_dict_weighted_merge, state_dict_offset_merge, generate_timestamp
 from diffusers_helper.models.hunyuan_video_packed import HunyuanVideoTransformer3DModelPacked
 from diffusers_helper.pipelines.k_diffusion_hunyuan import sample_hunyuan
-from diffusers_helper.memory import cpu, gpu, get_cuda_free_memory_gb, move_model_to_device_with_memory_preservation, offload_model_from_device_for_memory_preservation, fake_diffusers_current_device, DynamicSwapInstaller, unload_complete_models, load_model_as_complete
+from diffusers_helper.memory import cpu, gpu, get_cuda_free_memory_gb, move_model_to_device_with_memory_preservation, offload_model_from_device_for_memory_preservation, fake_diffusers_current_device, DynamicSwapInstaller, unload_complete_models, load_model_as_complete, IN_HF_SPACE as MEMORY_IN_HF_SPACE
 from diffusers_helper.thread_utils import AsyncStream, async_run
 from diffusers_helper.gradio.progress_bar import make_progress_bar_css, make_progress_bar_html
 from transformers import SiglipImageProcessor, SiglipVisionModel
 from diffusers_helper.clip_vision import hf_clip_vision_encode
 from diffusers_helper.bucket_tools import find_nearest_bucket
 
-# 获取可用的CUDA内存
-try:
-    if torch.cuda.is_available():
-        free_mem_gb = get_cuda_free_memory_gb(gpu)
-        print(f'Free VRAM {free_mem_gb} GB')
-    else:
-        free_mem_gb = 6.0  # 默认值
-        print("CUDA不可用，使用默认的内存设置")
-except Exception as e:
-    free_mem_gb = 6.0  # 默认值
-    print(f"获取CUDA内存时出错: {e}，使用默认的内存设置")
+outputs_folder = './outputs/'
+os.makedirs(outputs_folder, exist_ok=True)
 
-high_vram = free_mem_gb > 60
-print(f'High-VRAM Mode: {high_vram}')
+# 在Spaces环境中，我们延迟所有CUDA操作
+if not IN_HF_SPACE:
+    # 仅在非Spaces环境中获取CUDA内存
+    try:
+        if torch.cuda.is_available():
+            free_mem_gb = get_cuda_free_memory_gb(gpu)
+            print(f'Free VRAM {free_mem_gb} GB')
+        else:
+            free_mem_gb = 6.0  # 默认值
+            print("CUDA不可用，使用默认的内存设置")
+    except Exception as e:
+        free_mem_gb = 6.0  # 默认值
+        print(f"获取CUDA内存时出错: {e}，使用默认的内存设置")
+        
+    high_vram = free_mem_gb > 60
+    print(f'High-VRAM Mode: {high_vram}')
+else:
+    # 在Spaces环境中使用默认值
+    print("在Spaces环境中使用默认内存设置")
+    free_mem_gb = 60.0  # 默认在Spaces中使用较高的值
+    high_vram = True
+    print(f'High-VRAM Mode: {high_vram}')
+
+# 使用models变量存储全局模型引用
+models = {}
 
 # 使用加载模型的函数
 def load_models():
+    global models
+    
     print("开始加载模型...")
     
     # 加载模型
@@ -93,7 +109,7 @@ def load_models():
     image_encoder.requires_grad_(False)
     transformer.requires_grad_(False)
 
-    if torch.cuda.is_available() and gpu.type == 'cuda':
+    if torch.cuda.is_available():
         if not high_vram:
             # DynamicSwapInstaller is same as huggingface's enable_sequential_offload but 3x faster
             DynamicSwapInstaller.install_model(transformer, device=gpu)
@@ -105,28 +121,61 @@ def load_models():
             vae.to(gpu)
             transformer.to(gpu)
     
-    return text_encoder, text_encoder_2, tokenizer, tokenizer_2, vae, feature_extractor, image_encoder, transformer
+    # 保存到全局变量
+    models = {
+        'text_encoder': text_encoder,
+        'text_encoder_2': text_encoder_2,
+        'tokenizer': tokenizer,
+        'tokenizer_2': tokenizer_2,
+        'vae': vae,
+        'feature_extractor': feature_extractor,
+        'image_encoder': image_encoder,
+        'transformer': transformer
+    }
+    
+    return models
+
 
 # 使用Hugging Face Spaces GPU装饰器
 if IN_HF_SPACE and 'spaces' in globals():
     @spaces.GPU
-    def load_models_with_gpu():
+    def initialize_models():
+        """在@spaces.GPU装饰器内初始化模型"""
         return load_models()
+
+
+# 以下函数内部会延迟获取模型
+def get_models():
+    """获取模型，如果尚未加载则加载模型"""
+    global models
     
-    print("使用@spaces.GPU装饰器加载模型")
-    text_encoder, text_encoder_2, tokenizer, tokenizer_2, vae, feature_extractor, image_encoder, transformer = load_models_with_gpu()
-else:
-    print("不使用@spaces.GPU装饰器，直接加载模型")
-    text_encoder, text_encoder_2, tokenizer, tokenizer_2, vae, feature_extractor, image_encoder, transformer = load_models()
+    if not models:
+        if IN_HF_SPACE and 'spaces' in globals():
+            print("使用@spaces.GPU装饰器加载模型")
+            models = initialize_models()
+        else:
+            print("直接加载模型")
+            load_models()
+    
+    return models
+
 
 stream = AsyncStream()
-
-outputs_folder = './outputs/'
-os.makedirs(outputs_folder, exist_ok=True)
 
 
 @torch.no_grad()
 def worker(input_image, prompt, n_prompt, seed, total_second_length, latent_window_size, steps, cfg, gs, rs, gpu_memory_preservation, use_teacache):
+    # 获取模型
+    models = get_models()
+    text_encoder = models['text_encoder']
+    text_encoder_2 = models['text_encoder_2']
+    tokenizer = models['tokenizer']
+    tokenizer_2 = models['tokenizer_2']
+    vae = models['vae']
+    feature_extractor = models['feature_extractor']
+    image_encoder = models['image_encoder']
+    transformer = models['transformer']
+    
     total_latent_sections = (total_second_length * 30) / (latent_window_size * 4)
     total_latent_sections = int(max(round(total_latent_sections), 1))
 
