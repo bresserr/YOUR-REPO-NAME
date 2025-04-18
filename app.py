@@ -149,13 +149,33 @@ def get_models():
     """获取模型，如果尚未加载则加载模型"""
     global models
     
+    # 添加模型加载锁，防止并发加载
+    model_loading_key = "__model_loading__"
+    
     if not models:
-        if IN_HF_SPACE and 'spaces' in globals():
-            print("使用@spaces.GPU装饰器加载模型")
-            models = initialize_models()
-        else:
-            print("直接加载模型")
-            load_models()
+        # 检查是否正在加载模型
+        if model_loading_key in globals():
+            print("模型正在加载中，等待...")
+            # 等待模型加载完成
+            import time
+            while not models and model_loading_key in globals():
+                time.sleep(0.5)
+            return models
+            
+        try:
+            # 设置加载标记
+            globals()[model_loading_key] = True
+            
+            if IN_HF_SPACE and 'spaces' in globals():
+                print("使用@spaces.GPU装饰器加载模型")
+                models = initialize_models()
+            else:
+                print("直接加载模型")
+                load_models()
+        finally:
+            # 无论成功与否，都移除加载标记
+            if model_loading_key in globals():
+                del globals()[model_loading_key]
     
     return models
 
@@ -180,6 +200,10 @@ def worker(input_image, prompt, n_prompt, seed, total_second_length, latent_wind
     total_latent_sections = int(max(round(total_latent_sections), 1))
 
     job_id = generate_timestamp()
+    last_output_filename = None
+    history_pixels = None
+    history_latents = None
+    total_generated_latent_frames = 0
 
     stream.output_queue.push(('progress', (None, '', make_progress_bar_html(0, 'Starting ...'))))
 
@@ -273,6 +297,15 @@ def worker(input_image, prompt, n_prompt, seed, total_second_length, latent_wind
             latent_padding_size = latent_padding * latent_window_size
 
             if stream.input_queue.top() == 'end':
+                # 确保在结束时保存当前的视频
+                if history_pixels is not None and total_generated_latent_frames > 0:
+                    try:
+                        output_filename = os.path.join(outputs_folder, f'{job_id}_final_{total_generated_latent_frames}.mp4')
+                        save_bcthw_as_mp4(history_pixels, output_filename, fps=30)
+                        stream.output_queue.push(('file', output_filename))
+                    except Exception as e:
+                        print(f"保存最终视频时出错: {e}")
+                
                 stream.output_queue.push(('end', None))
                 return
 
@@ -313,36 +346,47 @@ def worker(input_image, prompt, n_prompt, seed, total_second_length, latent_wind
                 stream.output_queue.push(('progress', (preview, desc, make_progress_bar_html(percentage, hint))))
                 return
 
-            generated_latents = sample_hunyuan(
-                transformer=transformer,
-                sampler='unipc',
-                width=width,
-                height=height,
-                frames=num_frames,
-                real_guidance_scale=cfg,
-                distilled_guidance_scale=gs,
-                guidance_rescale=rs,
-                # shift=3.0,
-                num_inference_steps=steps,
-                generator=rnd,
-                prompt_embeds=llama_vec,
-                prompt_embeds_mask=llama_attention_mask,
-                prompt_poolers=clip_l_pooler,
-                negative_prompt_embeds=llama_vec_n,
-                negative_prompt_embeds_mask=llama_attention_mask_n,
-                negative_prompt_poolers=clip_l_pooler_n,
-                device=gpu,
-                dtype=torch.bfloat16,
-                image_embeddings=image_encoder_last_hidden_state,
-                latent_indices=latent_indices,
-                clean_latents=clean_latents,
-                clean_latent_indices=clean_latent_indices,
-                clean_latents_2x=clean_latents_2x,
-                clean_latent_2x_indices=clean_latent_2x_indices,
-                clean_latents_4x=clean_latents_4x,
-                clean_latent_4x_indices=clean_latent_4x_indices,
-                callback=callback,
-            )
+            try:
+                generated_latents = sample_hunyuan(
+                    transformer=transformer,
+                    sampler='unipc',
+                    width=width,
+                    height=height,
+                    frames=num_frames,
+                    real_guidance_scale=cfg,
+                    distilled_guidance_scale=gs,
+                    guidance_rescale=rs,
+                    # shift=3.0,
+                    num_inference_steps=steps,
+                    generator=rnd,
+                    prompt_embeds=llama_vec,
+                    prompt_embeds_mask=llama_attention_mask,
+                    prompt_poolers=clip_l_pooler,
+                    negative_prompt_embeds=llama_vec_n,
+                    negative_prompt_embeds_mask=llama_attention_mask_n,
+                    negative_prompt_poolers=clip_l_pooler_n,
+                    device=gpu,
+                    dtype=torch.bfloat16,
+                    image_embeddings=image_encoder_last_hidden_state,
+                    latent_indices=latent_indices,
+                    clean_latents=clean_latents,
+                    clean_latent_indices=clean_latent_indices,
+                    clean_latents_2x=clean_latents_2x,
+                    clean_latent_2x_indices=clean_latent_2x_indices,
+                    clean_latents_4x=clean_latents_4x,
+                    clean_latent_4x_indices=clean_latent_4x_indices,
+                    callback=callback,
+                )
+            except Exception as e:
+                print(f"采样过程中出错: {e}")
+                traceback.print_exc()
+                
+                # 如果已经有生成的视频，返回最后生成的视频
+                if last_output_filename:
+                    stream.output_queue.push(('file', last_output_filename))
+                
+                stream.output_queue.push(('end', None))
+                return
 
             if is_last_section:
                 generated_latents = torch.cat([start_latent.to(generated_latents), generated_latents], dim=2)
@@ -356,36 +400,57 @@ def worker(input_image, prompt, n_prompt, seed, total_second_length, latent_wind
 
             real_history_latents = history_latents[:, :, :total_generated_latent_frames, :, :]
 
-            if history_pixels is None:
-                history_pixels = vae_decode(real_history_latents, vae).cpu()
-            else:
-                section_latent_frames = (latent_window_size * 2 + 1) if is_last_section else (latent_window_size * 2)
-                overlapped_frames = latent_window_size * 4 - 3
+            try:
+                if history_pixels is None:
+                    history_pixels = vae_decode(real_history_latents, vae).cpu()
+                else:
+                    section_latent_frames = (latent_window_size * 2 + 1) if is_last_section else (latent_window_size * 2)
+                    overlapped_frames = latent_window_size * 4 - 3
 
-                current_pixels = vae_decode(real_history_latents[:, :, :section_latent_frames], vae).cpu()
-                history_pixels = soft_append_bcthw(current_pixels, history_pixels, overlapped_frames)
+                    current_pixels = vae_decode(real_history_latents[:, :, :section_latent_frames], vae).cpu()
+                    history_pixels = soft_append_bcthw(current_pixels, history_pixels, overlapped_frames)
 
-            if not high_vram:
-                unload_complete_models()
+                if not high_vram:
+                    unload_complete_models()
 
-            output_filename = os.path.join(outputs_folder, f'{job_id}_{total_generated_latent_frames}.mp4')
+                output_filename = os.path.join(outputs_folder, f'{job_id}_{total_generated_latent_frames}.mp4')
 
-            save_bcthw_as_mp4(history_pixels, output_filename, fps=30)
+                save_bcthw_as_mp4(history_pixels, output_filename, fps=30)
 
-            print(f'Decoded. Current latent shape {real_history_latents.shape}; pixel shape {history_pixels.shape}')
+                print(f'Decoded. Current latent shape {real_history_latents.shape}; pixel shape {history_pixels.shape}')
 
-            stream.output_queue.push(('file', output_filename))
+                last_output_filename = output_filename
+                stream.output_queue.push(('file', output_filename))
+            except Exception as e:
+                print(f"视频解码或保存过程中出错: {e}")
+                traceback.print_exc()
+                
+                # 如果已经有生成的视频，返回最后生成的视频
+                if last_output_filename:
+                    stream.output_queue.push(('file', last_output_filename))
+                
+                # 尝试继续下一次迭代
+                continue
 
             if is_last_section:
                 break
-    except:
+    except Exception as e:
+        print(f"处理过程中出现错误: {e}")
         traceback.print_exc()
 
         if not high_vram:
-            unload_complete_models(
-                text_encoder, text_encoder_2, image_encoder, vae, transformer
-            )
+            try:
+                unload_complete_models(
+                    text_encoder, text_encoder_2, image_encoder, vae, transformer
+                )
+            except Exception:
+                pass
+        
+        # 如果已经有生成的视频，返回最后生成的视频
+        if last_output_filename:
+            stream.output_queue.push(('file', last_output_filename))
 
+    # 确保总是返回end信号
     stream.output_queue.push(('end', None))
     return
 
@@ -397,28 +462,52 @@ if IN_HF_SPACE and 'spaces' in globals():
         global stream
         assert input_image is not None, 'No input image!'
 
+        # 初始化UI状态
         yield None, None, '', '', gr.update(interactive=False), gr.update(interactive=True)
 
-        stream = AsyncStream()
+        try:
+            stream = AsyncStream()
 
-        async_run(worker, input_image, prompt, n_prompt, seed, total_second_length, latent_window_size, steps, cfg, gs, rs, gpu_memory_preservation, use_teacache)
+            # 异步启动worker
+            async_run(worker, input_image, prompt, n_prompt, seed, total_second_length, latent_window_size, steps, cfg, gs, rs, gpu_memory_preservation, use_teacache)
 
-        output_filename = None
+            output_filename = None
+            prev_output_filename = None
 
-        while True:
-            flag, data = stream.output_queue.next()
+            # 持续检查worker的输出
+            while True:
+                try:
+                    flag, data = stream.output_queue.next()
 
-            if flag == 'file':
-                output_filename = data
-                yield output_filename, gr.update(), gr.update(), gr.update(), gr.update(interactive=False), gr.update(interactive=True)
+                    if flag == 'file':
+                        output_filename = data
+                        prev_output_filename = output_filename
+                        yield output_filename, gr.update(), gr.update(), gr.update(), gr.update(interactive=False), gr.update(interactive=True)
 
-            if flag == 'progress':
-                preview, desc, html = data
-                yield gr.update(), gr.update(visible=True, value=preview), desc, html, gr.update(interactive=False), gr.update(interactive=True)
+                    if flag == 'progress':
+                        preview, desc, html = data
+                        yield gr.update(), gr.update(visible=True, value=preview), desc, html, gr.update(interactive=False), gr.update(interactive=True)
 
-            if flag == 'end':
-                yield output_filename, gr.update(visible=False), gr.update(), '', gr.update(interactive=True), gr.update(interactive=False)
-                break
+                    if flag == 'end':
+                        # 如果有最后的视频文件，确保返回
+                        if output_filename is None and prev_output_filename is not None:
+                            output_filename = prev_output_filename
+                            
+                        yield output_filename, gr.update(visible=False), gr.update(), '', gr.update(interactive=True), gr.update(interactive=False)
+                        break
+                except Exception as e:
+                    print(f"处理输出时出错: {e}")
+                    # 如果有最后的视频文件，确保返回
+                    if prev_output_filename is not None:
+                        yield prev_output_filename, gr.update(visible=False), gr.update(), f'处理过程中出现错误，但已生成部分视频', gr.update(interactive=True), gr.update(interactive=False)
+                    else:
+                        yield None, gr.update(visible=False), gr.update(), f'处理过程中出现错误: {str(e)}', gr.update(interactive=True), gr.update(interactive=False)
+                    break
+                    
+        except Exception as e:
+            print(f"启动处理时出错: {e}")
+            traceback.print_exc()
+            yield None, gr.update(), gr.update(), f'启动处理时出错: {str(e)}', gr.update(interactive=True), gr.update(interactive=False)
     
     process = process_with_gpu
 else:
@@ -426,28 +515,52 @@ else:
         global stream
         assert input_image is not None, 'No input image!'
 
+        # 初始化UI状态
         yield None, None, '', '', gr.update(interactive=False), gr.update(interactive=True)
 
-        stream = AsyncStream()
+        try:
+            stream = AsyncStream()
 
-        async_run(worker, input_image, prompt, n_prompt, seed, total_second_length, latent_window_size, steps, cfg, gs, rs, gpu_memory_preservation, use_teacache)
+            # 异步启动worker
+            async_run(worker, input_image, prompt, n_prompt, seed, total_second_length, latent_window_size, steps, cfg, gs, rs, gpu_memory_preservation, use_teacache)
 
-        output_filename = None
+            output_filename = None
+            prev_output_filename = None
 
-        while True:
-            flag, data = stream.output_queue.next()
+            # 持续检查worker的输出
+            while True:
+                try:
+                    flag, data = stream.output_queue.next()
 
-            if flag == 'file':
-                output_filename = data
-                yield output_filename, gr.update(), gr.update(), gr.update(), gr.update(interactive=False), gr.update(interactive=True)
+                    if flag == 'file':
+                        output_filename = data
+                        prev_output_filename = output_filename
+                        yield output_filename, gr.update(), gr.update(), gr.update(), gr.update(interactive=False), gr.update(interactive=True)
 
-            if flag == 'progress':
-                preview, desc, html = data
-                yield gr.update(), gr.update(visible=True, value=preview), desc, html, gr.update(interactive=False), gr.update(interactive=True)
+                    if flag == 'progress':
+                        preview, desc, html = data
+                        yield gr.update(), gr.update(visible=True, value=preview), desc, html, gr.update(interactive=False), gr.update(interactive=True)
 
-            if flag == 'end':
-                yield output_filename, gr.update(visible=False), gr.update(), '', gr.update(interactive=True), gr.update(interactive=False)
-                break
+                    if flag == 'end':
+                        # 如果有最后的视频文件，确保返回
+                        if output_filename is None and prev_output_filename is not None:
+                            output_filename = prev_output_filename
+                            
+                        yield output_filename, gr.update(visible=False), gr.update(), '', gr.update(interactive=True), gr.update(interactive=False)
+                        break
+                except Exception as e:
+                    print(f"处理输出时出错: {e}")
+                    # 如果有最后的视频文件，确保返回
+                    if prev_output_filename is not None:
+                        yield prev_output_filename, gr.update(visible=False), gr.update(), f'处理过程中出现错误，但已生成部分视频', gr.update(interactive=True), gr.update(interactive=False)
+                    else:
+                        yield None, gr.update(visible=False), gr.update(), f'处理过程中出现错误: {str(e)}', gr.update(interactive=True), gr.update(interactive=False)
+                    break
+                    
+        except Exception as e:
+            print(f"启动处理时出错: {e}")
+            traceback.print_exc()
+            yield None, gr.update(), gr.update(), f'启动处理时出错: {str(e)}', gr.update(interactive=True), gr.update(interactive=False)
 
 
 def end_process():
