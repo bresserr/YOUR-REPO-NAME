@@ -882,10 +882,12 @@ if IN_HF_SPACE and 'spaces' in globals():
                     if flag == 'file':
                         output_filename = data
                         prev_output_filename = output_filename
-                        yield output_filename, gr.update(), gr.update(), gr.update(), gr.update(interactive=False), gr.update(interactive=True)
+                        # 清除错误显示，确保文件成功时不显示错误
+                        yield output_filename, gr.update(), gr.update(), '', gr.update(interactive=False), gr.update(interactive=True)
 
                     if flag == 'progress':
                         preview, desc, html = data
+                        # 更新进度时不改变错误信息
                         yield gr.update(), gr.update(visible=True, value=preview), desc, html, gr.update(interactive=False), gr.update(interactive=True)
                     
                     if flag == 'error':
@@ -903,6 +905,7 @@ if IN_HF_SPACE and 'spaces' in globals():
                             error_html = create_error_html(error_message)
                             yield output_filename, gr.update(visible=False), gr.update(), error_html, gr.update(interactive=True), gr.update(interactive=False)
                         else:
+                            # 确保成功完成时不显示任何错误
                             yield output_filename, gr.update(visible=False), gr.update(), '', gr.update(interactive=True), gr.update(interactive=False)
                         break
                 except Exception as e:
@@ -956,10 +959,12 @@ else:
                     if flag == 'file':
                         output_filename = data
                         prev_output_filename = output_filename
-                        yield output_filename, gr.update(), gr.update(), gr.update(), gr.update(interactive=False), gr.update(interactive=True)
+                        # 清除错误显示，确保文件成功时不显示错误
+                        yield output_filename, gr.update(), gr.update(), '', gr.update(interactive=False), gr.update(interactive=True)
 
                     if flag == 'progress':
                         preview, desc, html = data
+                        # 更新进度时不改变错误信息
                         yield gr.update(), gr.update(visible=True, value=preview), desc, html, gr.update(interactive=False), gr.update(interactive=True)
                     
                     if flag == 'error':
@@ -977,6 +982,7 @@ else:
                             error_html = create_error_html(error_message)
                             yield output_filename, gr.update(visible=False), gr.update(), error_html, gr.update(interactive=True), gr.update(interactive=False)
                         else:
+                            # 确保成功完成时不显示任何错误
                             yield output_filename, gr.update(visible=False), gr.update(), '', gr.update(interactive=True), gr.update(interactive=False)
                         break
                 except Exception as e:
@@ -1137,7 +1143,40 @@ def make_custom_css():
         padding: 10px;
         border-radius: 4px;
         margin-top: 10px;
+    }
+    
+    /* 确保错误容器正确显示 */
+    .error-message {
         background-color: rgba(255, 0, 0, 0.1);
+        padding: 10px;
+        border-radius: 4px;
+        margin-top: 10px;
+        border: 1px solid #ffcccc;
+    }
+    
+    /* 处理多语言错误消息 */
+    .error-msg-en, .error-msg-zh {
+        font-weight: bold;
+    }
+    
+    /* 错误图标 */
+    .error-icon {
+        color: #ff4444;
+        font-size: 18px;
+        margin-right: 8px;
+    }
+    
+    /* 确保空错误消息不显示背景和边框 */
+    #error-message:empty {
+        background-color: transparent;
+        border: none;
+        padding: 0;
+        margin: 0;
+    }
+    
+    /* 修复Gradio默认错误显示 */
+    .error {
+        display: none !important;
     }
     """
     
@@ -1454,8 +1493,8 @@ with block:
                 progress_desc = gr.Markdown('', elem_classes='no-generating-animation')
                 progress_bar = gr.HTML('', elem_classes='no-generating-animation')
             
-            # 错误信息区域
-            error_message = gr.Markdown('', elem_id='error-message')
+            # 错误信息区域 - 确保使用HTML组件以支持我们的自定义错误消息格式
+            error_message = gr.HTML('', elem_id='error-message', visible=True)
     
     # 处理函数
     ips = [input_image, prompt, n_prompt, seed, total_second_length, latent_window_size, steps, cfg, gs, rs, gpu_memory_preservation, use_teacache]
@@ -1500,21 +1539,31 @@ def create_error_html(error_msg, is_timeout=False):
         en_msg = f"Processing error: {error_msg}"
         zh_msg = f"处理过程出错: {error_msg}"
     
-    # 创建双语错误消息HTML
+    # 创建双语错误消息HTML - 添加有用的图标并确保CSS样式适用
     return f"""
-    <div id="error-container" class="error-message">
-        <div class="error-msg-en" data-lang="en">{en_msg}</div>
-        <div class="error-msg-zh" data-lang="zh">{zh_msg}</div>
+    <div class="error-message" id="custom-error-container">
+        <div class="error-msg-en" data-lang="en">
+            <span class="error-icon">⚠️</span> {en_msg}
+        </div>
+        <div class="error-msg-zh" data-lang="zh">
+            <span class="error-icon">⚠️</span> {zh_msg}
+        </div>
     </div>
     <script>
         // 根据当前语言显示相应的错误消息
         (function() {{
-            const errorContainer = document.getElementById('error-container');
+            const errorContainer = document.getElementById('custom-error-container');
             if (errorContainer) {{
                 const currentLang = window.currentLang || 'en'; // 默认英语
                 const errMsgs = errorContainer.querySelectorAll('[data-lang]');
                 errMsgs.forEach(msg => {{
                     msg.style.display = msg.getAttribute('data-lang') === currentLang ? 'block' : 'none';
+                }});
+                
+                // 确保Gradio默认错误UI不显示
+                const defaultErrorElements = document.querySelectorAll('.error');
+                defaultErrorElements.forEach(el => {{
+                    el.style.display = 'none';
                 }});
             }}
         }})();
