@@ -671,21 +671,26 @@ def worker(input_image, prompt, n_prompt, seed, total_second_length, latent_wind
                 last_update_time = time.time()
                 
                 try:
+                    # 首先检查是否有停止信号
+                    if stream.input_queue.top() == 'end':
+                        print("检测到停止信号，中断采样过程...")
+                        stream.output_queue.push(('end', None))
+                        raise KeyboardInterrupt('用户主动结束任务')
+                        
                     preview = d['denoised']
                     preview = vae_decode_fake(preview)
 
                     preview = (preview * 255.0).detach().cpu().numpy().clip(0, 255).astype(np.uint8)
                     preview = einops.rearrange(preview, 'b c t h w -> (b h) (t w) c')
 
-                    if stream.input_queue.top() == 'end':
-                        stream.output_queue.push(('end', None))
-                        raise KeyboardInterrupt('User ends the task.')
-
                     current_step = d['i'] + 1
                     percentage = int(100.0 * current_step / steps)
                     hint = f'Sampling {current_step}/{steps}'
                     desc = f'Total generated frames: {int(max(0, total_generated_latent_frames * 4 - 3))}, Video length: {max(0, (total_generated_latent_frames * 4 - 3) / 30) :.2f} seconds (FPS-30). The video is being extended now ...'
                     stream.output_queue.push(('progress', (preview, desc, make_progress_bar_html(percentage, hint))))
+                except KeyboardInterrupt:
+                    # 捕获并重新抛出中断异常，确保它能传播到采样函数
+                    raise
                 except Exception as e:
                     print(f"回调函数中出错: {e}")
                     # 不中断采样过程
@@ -695,38 +700,53 @@ def worker(input_image, prompt, n_prompt, seed, total_second_length, latent_wind
                 sampling_start_time = time.time()
                 print(f"开始采样，设备: {device}, 数据类型: {transformer.dtype}, 使用TeaCache: {use_teacache and not cpu_fallback_mode}")
                 
-                generated_latents = sample_hunyuan(
-                    transformer=transformer,
-                    sampler='unipc',
-                    width=width,
-                    height=height,
-                    frames=num_frames,
-                    real_guidance_scale=cfg,
-                    distilled_guidance_scale=gs,
-                    guidance_rescale=rs,
-                    # shift=3.0,
-                    num_inference_steps=steps,
-                    generator=rnd,
-                    prompt_embeds=llama_vec,
-                    prompt_embeds_mask=llama_attention_mask,
-                    prompt_poolers=clip_l_pooler,
-                    negative_prompt_embeds=llama_vec_n,
-                    negative_prompt_embeds_mask=llama_attention_mask_n,
-                    negative_prompt_poolers=clip_l_pooler_n,
-                    device=device,
-                    dtype=transformer.dtype,
-                    image_embeddings=image_encoder_last_hidden_state,
-                    latent_indices=latent_indices,
-                    clean_latents=clean_latents,
-                    clean_latent_indices=clean_latent_indices,
-                    clean_latents_2x=clean_latents_2x,
-                    clean_latent_2x_indices=clean_latent_2x_indices,
-                    clean_latents_4x=clean_latents_4x,
-                    clean_latent_4x_indices=clean_latent_4x_indices,
-                    callback=callback,
-                )
-                
-                print(f"采样完成，用时: {time.time() - sampling_start_time:.2f}秒")
+                try:
+                    generated_latents = sample_hunyuan(
+                        transformer=transformer,
+                        sampler='unipc',
+                        width=width,
+                        height=height,
+                        frames=num_frames,
+                        real_guidance_scale=cfg,
+                        distilled_guidance_scale=gs,
+                        guidance_rescale=rs,
+                        # shift=3.0,
+                        num_inference_steps=steps,
+                        generator=rnd,
+                        prompt_embeds=llama_vec,
+                        prompt_embeds_mask=llama_attention_mask,
+                        prompt_poolers=clip_l_pooler,
+                        negative_prompt_embeds=llama_vec_n,
+                        negative_prompt_embeds_mask=llama_attention_mask_n,
+                        negative_prompt_poolers=clip_l_pooler_n,
+                        device=device,
+                        dtype=transformer.dtype,
+                        image_embeddings=image_encoder_last_hidden_state,
+                        latent_indices=latent_indices,
+                        clean_latents=clean_latents,
+                        clean_latent_indices=clean_latent_indices,
+                        clean_latents_2x=clean_latents_2x,
+                        clean_latent_2x_indices=clean_latent_2x_indices,
+                        clean_latents_4x=clean_latents_4x,
+                        clean_latent_4x_indices=clean_latent_4x_indices,
+                        callback=callback,
+                    )
+                    
+                    print(f"采样完成，用时: {time.time() - sampling_start_time:.2f}秒")
+                except KeyboardInterrupt:
+                    # 用户主动中断
+                    print("用户主动中断采样过程")
+                    
+                    # 如果已经有生成的视频，返回最后生成的视频
+                    if last_output_filename:
+                        stream.output_queue.push(('file', last_output_filename))
+                        error_msg = "用户中断生成过程，但已生成部分视频"
+                    else:
+                        error_msg = "用户中断生成过程，未生成视频"
+                    
+                    stream.output_queue.push(('error', error_msg))
+                    stream.output_queue.push(('end', None))
+                    return
             except Exception as e:
                 print(f"采样过程中出错: {e}")
                 traceback.print_exc()
@@ -887,7 +907,7 @@ if IN_HF_SPACE and 'spaces' in globals():
 
                     if flag == 'progress':
                         preview, desc, html = data
-                        # 更新进度时不改变错误信息
+                        # 更新进度时不改变错误信息，并确保停止按钮可交互
                         yield gr.update(), gr.update(visible=True, value=preview), desc, html, gr.update(interactive=False), gr.update(interactive=True)
                     
                     if flag == 'error':
@@ -964,7 +984,7 @@ else:
 
                     if flag == 'progress':
                         preview, desc, html = data
-                        # 更新进度时不改变错误信息
+                        # 更新进度时不改变错误信息，并确保停止按钮可交互
                         yield gr.update(), gr.update(visible=True, value=preview), desc, html, gr.update(interactive=False), gr.update(interactive=True)
                     
                     if flag == 'error':
@@ -1011,7 +1031,14 @@ else:
 
 
 def end_process():
-    stream.input_queue.push('end')
+    """停止生成过程函数 - 通过在队列中推送'end'信号来中断生成"""
+    print("用户点击了停止按钮，发送停止信号...")
+    # 确保stream已初始化
+    if 'stream' in globals() and stream is not None:
+        stream.input_queue.push('end')
+    else:
+        print("警告: stream未初始化，无法发送停止信号")
+    return None
 
 
 quick_prompts = [

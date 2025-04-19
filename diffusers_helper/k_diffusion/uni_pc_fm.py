@@ -111,27 +111,41 @@ class FlowMatchUniPC:
     def sample(self, x, sigmas, callback=None, disable_pbar=False):
         order = min(3, len(sigmas) - 2)
         model_prev_list, t_prev_list = [], []
-        for i in trange(len(sigmas) - 1, disable=disable_pbar):
-            vec_t = sigmas[i].expand(x.shape[0])
+        try:
+            for i in trange(len(sigmas) - 1, disable=disable_pbar):
+                vec_t = sigmas[i].expand(x.shape[0])
 
-            if i == 0:
-                model_prev_list = [self.model_fn(x, vec_t)]
-                t_prev_list = [vec_t]
-            elif i < order:
-                init_order = i
-                x, model_x = self.update_fn(x, model_prev_list, t_prev_list, vec_t, init_order)
-                model_prev_list.append(model_x)
-                t_prev_list.append(vec_t)
+                if i == 0:
+                    model_prev_list = [self.model_fn(x, vec_t)]
+                    t_prev_list = [vec_t]
+                elif i < order:
+                    init_order = i
+                    x, model_x = self.update_fn(x, model_prev_list, t_prev_list, vec_t, init_order)
+                    model_prev_list.append(model_x)
+                    t_prev_list.append(vec_t)
+                else:
+                    x, model_x = self.update_fn(x, model_prev_list, t_prev_list, vec_t, order)
+                    model_prev_list.append(model_x)
+                    t_prev_list.append(vec_t)
+
+                model_prev_list = model_prev_list[-order:]
+                t_prev_list = t_prev_list[-order:]
+
+                if callback is not None:
+                    try:
+                        callback({'x': x, 'i': i, 'denoised': model_prev_list[-1]})
+                    except KeyboardInterrupt as e:
+                        print(f"User interruption detected: {e}")
+                        # Return the last available result
+                        return model_prev_list[-1]
+        except KeyboardInterrupt as e:
+            print(f"Process interrupted: {e}")
+            # Return the last available result if we have one
+            if model_prev_list:
+                return model_prev_list[-1]
             else:
-                x, model_x = self.update_fn(x, model_prev_list, t_prev_list, vec_t, order)
-                model_prev_list.append(model_x)
-                t_prev_list.append(vec_t)
-
-            model_prev_list = model_prev_list[-order:]
-            t_prev_list = t_prev_list[-order:]
-
-            if callback is not None:
-                callback({'x': x, 'i': i, 'denoised': model_prev_list[-1]})
+                # If no results yet, re-raise the exception
+                raise
 
         return model_prev_list[-1]
 
