@@ -1,8 +1,98 @@
 from diffusers_helper.hf_login import login
 
 import os
+import threading
+import time
+import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
+import json
 
 os.environ['HF_HOME'] = os.path.abspath(os.path.realpath(os.path.join(os.path.dirname(__file__), './hf_download')))
+
+# 添加中英双语翻译字典
+translations = {
+    "en": {
+        "title": "FramePack - Image to Video Generation",
+        "upload_image": "Upload Image",
+        "prompt": "Prompt",
+        "quick_prompts": "Quick Prompts",
+        "start_generation": "Generate",
+        "stop_generation": "Stop",
+        "use_teacache": "Use TeaCache",
+        "teacache_info": "Faster speed, but may result in slightly worse finger and hand generation.",
+        "negative_prompt": "Negative Prompt",
+        "seed": "Seed",
+        "video_length": "Video Length (seconds)",
+        "latent_window": "Latent Window Size",
+        "steps": "Inference Steps",
+        "steps_info": "Changing this value is not recommended.",
+        "cfg_scale": "CFG Scale",
+        "distilled_cfg": "Distilled CFG Scale",
+        "distilled_cfg_info": "Changing this value is not recommended.",
+        "cfg_rescale": "CFG Rescale",
+        "gpu_memory": "GPU Memory Preservation (GB) (larger means slower)",
+        "gpu_memory_info": "Set this to a larger value if you encounter OOM errors. Larger values cause slower speed.",
+        "next_latents": "Next Latents",
+        "generated_video": "Generated Video",
+        "sampling_note": "Note: Due to reversed sampling, ending actions will be generated before starting actions. If the starting action is not in the video, please wait, it will be generated later.",
+        "error_message": "Error",
+        "processing_error": "Processing error",
+        "network_error": "Network connection is unstable, model download timed out. Please try again later.",
+        "memory_error": "GPU memory insufficient, please try increasing GPU memory preservation value or reduce video length.",
+        "model_error": "Failed to load model, possibly due to network issues or high server load. Please try again later.",
+        "partial_video": "Processing error, but partial video has been generated",
+        "processing_interrupt": "Processing was interrupted, but partial video has been generated"
+    },
+    "zh": {
+        "title": "FramePack - 图像到视频生成",
+        "upload_image": "上传图像",
+        "prompt": "提示词",
+        "quick_prompts": "快速提示词列表",
+        "start_generation": "开始生成",
+        "stop_generation": "结束生成",
+        "use_teacache": "使用TeaCache",
+        "teacache_info": "速度更快，但可能会使手指和手的生成效果稍差。",
+        "negative_prompt": "负面提示词",
+        "seed": "随机种子",
+        "video_length": "视频长度(秒)",
+        "latent_window": "潜在窗口大小",
+        "steps": "推理步数",
+        "steps_info": "不建议修改此值。",
+        "cfg_scale": "CFG Scale",
+        "distilled_cfg": "蒸馏CFG比例",
+        "distilled_cfg_info": "不建议修改此值。",
+        "cfg_rescale": "CFG重缩放",
+        "gpu_memory": "GPU推理保留内存(GB)(值越大速度越慢)",
+        "gpu_memory_info": "如果出现OOM错误，请将此值设置得更大。值越大，速度越慢。",
+        "next_latents": "下一批潜变量",
+        "generated_video": "生成的视频",
+        "sampling_note": "注意：由于采样是倒序的，结束动作将在开始动作之前生成。如果视频中没有出现起始动作，请继续等待，它将在稍后生成。",
+        "error_message": "错误信息",
+        "processing_error": "处理过程出错",
+        "network_error": "网络连接不稳定，模型下载超时。请稍后再试。",
+        "memory_error": "GPU内存不足，请尝试增加GPU推理保留内存值或降低视频长度。",
+        "model_error": "模型加载失败，可能是网络问题或服务器负载过高。请稍后再试。",
+        "partial_video": "处理过程中出现错误，但已生成部分视频",
+        "processing_interrupt": "处理过程中断，但已生成部分视频"
+    }
+}
+
+# 语言切换功能
+def get_translation(key, lang="en"):
+    if lang in translations and key in translations[lang]:
+        return translations[lang][key]
+    # 默认返回英文
+    return translations["en"].get(key, key)
+
+# 默认语言设置
+current_language = "en"
+
+# 切换语言函数
+def switch_language():
+    global current_language
+    current_language = "zh" if current_language == "en" else "en"
+    return current_language
 
 import gradio as gr
 import torch
@@ -497,17 +587,107 @@ if IN_HF_SPACE and 'spaces' in globals():
                         break
                 except Exception as e:
                     print(f"处理输出时出错: {e}")
-                    # 如果有最后的视频文件，确保返回
-                    if prev_output_filename is not None:
-                        yield prev_output_filename, gr.update(visible=False), gr.update(), f'处理过程中出现错误，但已生成部分视频', gr.update(interactive=True), gr.update(interactive=False)
-                    else:
-                        yield None, gr.update(visible=False), gr.update(), f'处理过程中出现错误: {str(e)}', gr.update(interactive=True), gr.update(interactive=False)
-                    break
+                    # 检查是否长时间没有更新
+                    current_time = time.time()
+                    if current_time - last_update_time > 60:  # 60秒没有更新，可能卡住了
+                        print(f"处理似乎卡住了，已经 {current_time - last_update_time:.1f} 秒没有更新")
+                        
+                        # 如果有部分生成的视频，返回
+                        if prev_output_filename:
+                            # 创建双语部分视频生成消息
+                            partial_video_msg = f"""
+                            <div id="partial-video-container">
+                                <div class="msg-en" data-lang="en">Processing error, but partial video has been generated</div>
+                                <div class="msg-zh" data-lang="zh">处理过程中出现错误，但已生成部分视频</div>
+                            </div>
+                            <script>
+                                // 根据当前语言显示相应的消息
+                                (function() {{
+                                    const container = document.getElementById('partial-video-container');
+                                    if (container) {{
+                                        const currentLang = window.currentLang || 'en'; // 默认英语
+                                        const msgs = container.querySelectorAll('[data-lang]');
+                                        msgs.forEach(msg => {{
+                                            msg.style.display = msg.getAttribute('data-lang') === currentLang ? 'block' : 'none';
+                                        }});
+                                    }}
+                                }})();
+                            </script>
+                            """
+                            yield prev_output_filename, gr.update(visible=False), gr.update(), partial_video_msg, gr.update(interactive=True), gr.update(interactive=False)
+                        else:
+                            # 创建双语错误消息
+                            error_msg = str(e)
+                            en_msg = f"Processing error: {error_msg}"
+                            zh_msg = f"处理过程中出现错误: {error_msg}"
+                            
+                            error_html = f"""
+                            <div id="error-msg-container">
+                                <div class="error-msg-en" data-lang="en">{en_msg}</div>
+                                <div class="error-msg-zh" data-lang="zh">{zh_msg}</div>
+                            </div>
+                            <script>
+                                // 根据当前语言显示相应的错误消息
+                                (function() {{
+                                    const errorContainer = document.getElementById('error-msg-container');
+                                    if (errorContainer) {{
+                                        const currentLang = window.currentLang || 'en'; // 默认英语
+                                        const errMsgs = errorContainer.querySelectorAll('[data-lang]');
+                                        errMsgs.forEach(msg => {{
+                                            msg.style.display = msg.getAttribute('data-lang') === currentLang ? 'block' : 'none';
+                                        }});
+                                    }}
+                                }})();
+                            </script>
+                            """
+                            yield None, gr.update(visible=False), gr.update(), error_html, gr.update(interactive=True), gr.update(interactive=False)
+                        break
                     
         except Exception as e:
             print(f"启动处理时出错: {e}")
             traceback.print_exc()
-            yield None, gr.update(), gr.update(), f'启动处理时出错: {str(e)}', gr.update(interactive=True), gr.update(interactive=False)
+            error_msg = str(e)
+            user_friendly_msg = f'处理过程出错: {error_msg}'
+            
+            # 提供更友好的中英文双语错误信息
+            en_msg = ""
+            zh_msg = ""
+            
+            if "模型下载超时" in error_msg or "网络连接不稳定" in error_msg or "ReadTimeoutError" in error_msg or "ConnectionError" in error_msg:
+                en_msg = "Network connection is unstable, model download timed out. Please try again later."
+                zh_msg = "网络连接不稳定，模型下载超时。请稍后再试。"
+            elif "GPU内存不足" in error_msg or "CUDA out of memory" in error_msg or "OutOfMemoryError" in error_msg:
+                en_msg = "GPU memory insufficient, please try increasing GPU memory preservation value or reduce video length."
+                zh_msg = "GPU内存不足，请尝试增加GPU推理保留内存值或降低视频长度。"
+            elif "无法加载模型" in error_msg:
+                en_msg = "Failed to load model, possibly due to network issues or high server load. Please try again later."
+                zh_msg = "模型加载失败，可能是网络问题或服务器负载过高。请稍后再试。"
+            else:
+                en_msg = f"Processing error: {error_msg}"
+                zh_msg = f"处理过程出错: {error_msg}"
+                
+            # 创建双语错误消息HTML
+            bilingual_error = f"""
+            <div id="error-container">
+                <div class="error-msg-en" data-lang="en">{en_msg}</div>
+                <div class="error-msg-zh" data-lang="zh">{zh_msg}</div>
+            </div>
+            <script>
+                // 根据当前语言显示相应的错误消息
+                (function() {{
+                    const errorContainer = document.getElementById('error-container');
+                    if (errorContainer) {{
+                        const currentLang = window.currentLang || 'en'; // 默认英语
+                        const errMsgs = errorContainer.querySelectorAll('[data-lang]');
+                        errMsgs.forEach(msg => {{
+                            msg.style.display = msg.getAttribute('data-lang') === currentLang ? 'block' : 'none';
+                        }});
+                    }}
+                }})();
+            </script>
+            """
+                
+            yield None, gr.update(visible=False), gr.update(), bilingual_error, gr.update(interactive=True), gr.update(interactive=False)
     
     process = process_with_gpu
 else:
@@ -550,17 +730,81 @@ else:
                         break
                 except Exception as e:
                     print(f"处理输出时出错: {e}")
-                    # 如果有最后的视频文件，确保返回
-                    if prev_output_filename is not None:
-                        yield prev_output_filename, gr.update(visible=False), gr.update(), f'处理过程中出现错误，但已生成部分视频', gr.update(interactive=True), gr.update(interactive=False)
-                    else:
-                        yield None, gr.update(visible=False), gr.update(), f'处理过程中出现错误: {str(e)}', gr.update(interactive=True), gr.update(interactive=False)
-                    break
+                    # 检查是否长时间没有更新
+                    current_time = time.time()
+                    if current_time - last_update_time > 60:  # 60秒没有更新，可能卡住了
+                        print(f"处理似乎卡住了，已经 {current_time - last_update_time:.1f} 秒没有更新")
+                        
+                        # 如果有部分生成的视频，返回
+                        if prev_output_filename:
+                            # 创建中断消息的双语支持
+                            interrupt_msg = f"""
+                            <div id="interrupt-container">
+                                <div class="msg-en" data-lang="en">Processing was interrupted, but partial video has been generated</div>
+                                <div class="msg-zh" data-lang="zh">处理过程中断，但已生成部分视频</div>
+                            </div>
+                            <script>
+                                // 根据当前语言显示相应的消息
+                                (function() {{
+                                    const container = document.getElementById('interrupt-container');
+                                    if (container) {{
+                                        const currentLang = window.currentLang || 'en'; // 默认英语
+                                        const msgs = container.querySelectorAll('[data-lang]');
+                                        msgs.forEach(msg => {{
+                                            msg.style.display = msg.getAttribute('data-lang') === currentLang ? 'block' : 'none';
+                                        }});
+                                    }}
+                                }})();
+                            </script>
+                            """
+                            yield prev_output_filename, gr.update(visible=False), gr.update(), interrupt_msg, gr.update(interactive=True), gr.update(interactive=False)
+                            break
                     
         except Exception as e:
             print(f"启动处理时出错: {e}")
             traceback.print_exc()
-            yield None, gr.update(), gr.update(), f'启动处理时出错: {str(e)}', gr.update(interactive=True), gr.update(interactive=False)
+            error_msg = str(e)
+            user_friendly_msg = f'处理过程出错: {error_msg}'
+            
+            # 提供更友好的中英文双语错误信息
+            en_msg = ""
+            zh_msg = ""
+            
+            if "模型下载超时" in error_msg or "网络连接不稳定" in error_msg or "ReadTimeoutError" in error_msg or "ConnectionError" in error_msg:
+                en_msg = "Network connection is unstable, model download timed out. Please try again later."
+                zh_msg = "网络连接不稳定，模型下载超时。请稍后再试。"
+            elif "GPU内存不足" in error_msg or "CUDA out of memory" in error_msg or "OutOfMemoryError" in error_msg:
+                en_msg = "GPU memory insufficient, please try increasing GPU memory preservation value or reduce video length."
+                zh_msg = "GPU内存不足，请尝试增加GPU推理保留内存值或降低视频长度。"
+            elif "无法加载模型" in error_msg:
+                en_msg = "Failed to load model, possibly due to network issues or high server load. Please try again later."
+                zh_msg = "模型加载失败，可能是网络问题或服务器负载过高。请稍后再试。"
+            else:
+                en_msg = f"Processing error: {error_msg}"
+                zh_msg = f"处理过程出错: {error_msg}"
+                
+            # 创建双语错误消息HTML
+            bilingual_error = f"""
+            <div id="error-container">
+                <div class="error-msg-en" data-lang="en">{en_msg}</div>
+                <div class="error-msg-zh" data-lang="zh">{zh_msg}</div>
+            </div>
+            <script>
+                // 根据当前语言显示相应的错误消息
+                (function() {{
+                    const errorContainer = document.getElementById('error-container');
+                    if (errorContainer) {{
+                        const currentLang = window.currentLang || 'en'; // 默认英语
+                        const errMsgs = errorContainer.querySelectorAll('[data-lang]');
+                        errMsgs.forEach(msg => {{
+                            msg.style.display = msg.getAttribute('data-lang') === currentLang ? 'block' : 'none';
+                        }});
+                    }}
+                }})();
+            </script>
+            """
+                
+            yield None, gr.update(visible=False), gr.update(), bilingual_error, gr.update(interactive=True), gr.update(interactive=False)
 
 
 def end_process():
@@ -574,46 +818,454 @@ quick_prompts = [
 quick_prompts = [[x] for x in quick_prompts]
 
 
-css = make_progress_bar_css()
+css = make_custom_css()
 block = gr.Blocks(css=css).queue()
 with block:
-    gr.Markdown('# FramePack - 图像到视频生成')
-    with gr.Row():
-        with gr.Column():
-            input_image = gr.Image(sources='upload', type="numpy", label="上传图像", height=320)
-            prompt = gr.Textbox(label="提示词", value='')
-            example_quick_prompts = gr.Dataset(samples=quick_prompts, label='快速提示词列表', samples_per_page=1000, components=[prompt])
+    # 添加语言切换功能
+    gr.HTML("""
+        <div id="app-container">
+            <button id="language-toggle" onclick="toggleLanguage()">中文/English</button>
+        </div>
+        <script>
+            // 全局变量，存储当前语言
+            window.currentLang = "en";
+            
+            // 语言切换函数
+            function toggleLanguage() {
+                window.currentLang = window.currentLang === "en" ? "zh" : "en";
+                
+                // 获取所有带有data-i18n属性的元素
+                const elements = document.querySelectorAll('[data-i18n]');
+                
+                // 遍历并切换语言
+                elements.forEach(el => {
+                    const key = el.getAttribute('data-i18n');
+                    const translations = {
+                        "en": {
+                            "title": "FramePack - Image to Video Generation",
+                            "upload_image": "Upload Image",
+                            "prompt": "Prompt",
+                            "quick_prompts": "Quick Prompts",
+                            "start_generation": "Generate",
+                            "stop_generation": "Stop",
+                            "use_teacache": "Use TeaCache",
+                            "teacache_info": "Faster speed, but may result in slightly worse finger and hand generation.",
+                            "negative_prompt": "Negative Prompt",
+                            "seed": "Seed",
+                            "video_length": "Video Length (seconds)",
+                            "latent_window": "Latent Window Size",
+                            "steps": "Inference Steps",
+                            "steps_info": "Changing this value is not recommended.",
+                            "cfg_scale": "CFG Scale",
+                            "distilled_cfg": "Distilled CFG Scale",
+                            "distilled_cfg_info": "Changing this value is not recommended.",
+                            "cfg_rescale": "CFG Rescale",
+                            "gpu_memory": "GPU Memory Preservation (GB) (larger means slower)",
+                            "gpu_memory_info": "Set this to a larger value if you encounter OOM errors. Larger values cause slower speed.",
+                            "next_latents": "Next Latents",
+                            "generated_video": "Generated Video",
+                            "sampling_note": "Note: Due to reversed sampling, ending actions will be generated before starting actions. If the starting action is not in the video, please wait, it will be generated later.",
+                            "error_message": "Error",
+                            "processing_error": "Processing error",
+                            "network_error": "Network connection is unstable, model download timed out. Please try again later.",
+                            "memory_error": "GPU memory insufficient, please try increasing GPU memory preservation value or reduce video length.",
+                            "model_error": "Failed to load model, possibly due to network issues or high server load. Please try again later.",
+                            "partial_video": "Processing error, but partial video has been generated",
+                            "processing_interrupt": "Processing was interrupted, but partial video has been generated"
+                        },
+                        "zh": {
+                            "title": "FramePack - 图像到视频生成",
+                            "upload_image": "上传图像",
+                            "prompt": "提示词",
+                            "quick_prompts": "快速提示词列表",
+                            "start_generation": "开始生成",
+                            "stop_generation": "结束生成",
+                            "use_teacache": "使用TeaCache",
+                            "teacache_info": "速度更快，但可能会使手指和手的生成效果稍差。",
+                            "negative_prompt": "负面提示词",
+                            "seed": "随机种子",
+                            "video_length": "视频长度(秒)",
+                            "latent_window": "潜在窗口大小",
+                            "steps": "推理步数",
+                            "steps_info": "不建议修改此值。",
+                            "cfg_scale": "CFG Scale",
+                            "distilled_cfg": "蒸馏CFG比例",
+                            "distilled_cfg_info": "不建议修改此值。",
+                            "cfg_rescale": "CFG重缩放",
+                            "gpu_memory": "GPU推理保留内存(GB)(值越大速度越慢)",
+                            "gpu_memory_info": "如果出现OOM错误，请将此值设置得更大。值越大，速度越慢。",
+                            "next_latents": "下一批潜变量",
+                            "generated_video": "生成的视频",
+                            "sampling_note": "注意：由于采样是倒序的，结束动作将在开始动作之前生成。如果视频中没有出现起始动作，请继续等待，它将在稍后生成。",
+                            "error_message": "错误信息",
+                            "processing_error": "处理过程出错",
+                            "network_error": "网络连接不稳定，模型下载超时。请稍后再试。",
+                            "memory_error": "GPU内存不足，请尝试增加GPU推理保留内存值或降低视频长度。",
+                            "model_error": "模型加载失败，可能是网络问题或服务器负载过高。请稍后再试。",
+                            "partial_video": "处理过程中出现错误，但已生成部分视频",
+                            "processing_interrupt": "处理过程中断，但已生成部分视频"
+                        }
+                    };
+                    
+                    if (translations[window.currentLang] && translations[window.currentLang][key]) {
+                        // 根据元素类型设置文本
+                        if (el.tagName === 'BUTTON') {
+                            el.textContent = translations[window.currentLang][key];
+                        } else if (el.tagName === 'LABEL') {
+                            el.textContent = translations[window.currentLang][key];
+                        } else {
+                            el.innerHTML = translations[window.currentLang][key];
+                        }
+                    }
+                });
+                
+                // 更新页面上其他元素
+                document.querySelectorAll('.bilingual-label').forEach(el => {
+                    const enText = el.getAttribute('data-en');
+                    const zhText = el.getAttribute('data-zh');
+                    el.textContent = window.currentLang === 'en' ? enText : zhText;
+                });
+                
+                // 处理错误消息容器
+                document.querySelectorAll('[data-lang]').forEach(el => {
+                    el.style.display = el.getAttribute('data-lang') === window.currentLang ? 'block' : 'none';
+                });
+            }
+            
+            // 页面加载后初始化
+            document.addEventListener('DOMContentLoaded', function() {
+                // 添加data-i18n属性到需要国际化的元素
+                setTimeout(() => {
+                    // 给所有标签添加i18n属性
+                    const labelMap = {
+                        "Upload Image": "upload_image",
+                        "上传图像": "upload_image",
+                        "Prompt": "prompt",
+                        "提示词": "prompt",
+                        "Quick Prompts": "quick_prompts",
+                        "快速提示词列表": "quick_prompts",
+                        "Generate": "start_generation", 
+                        "开始生成": "start_generation",
+                        "Stop": "stop_generation",
+                        "结束生成": "stop_generation",
+                        // 添加其他标签映射...
+                    };
+                    
+                    // 处理标签
+                    document.querySelectorAll('label, span, button').forEach(el => {
+                        const text = el.textContent.trim();
+                        if (labelMap[text]) {
+                            el.setAttribute('data-i18n', labelMap[text]);
+                        }
+                    });
+                    
+                    // 添加特定元素的i18n属性
+                    const titleEl = document.querySelector('h1');
+                    if (titleEl) titleEl.setAttribute('data-i18n', 'title');
+                    
+                    // 初始化标签语言
+                    toggleLanguage();
+                }, 1000);
+            });
+        </script>
+    """)
+    
+    # 标题使用data-i18n属性以便JavaScript切换
+    gr.HTML("<h1 data-i18n='title'>FramePack - Image to Video Generation / 图像到视频生成</h1>")
+    
+    # 使用带有mobile-full-width类的响应式行
+    with gr.Row(elem_classes="mobile-full-width"):
+        with gr.Column(scale=1, elem_classes="mobile-full-width"):
+            # 添加双语标签 - 上传图像
+            input_image = gr.Image(
+                sources='upload', 
+                type="numpy", 
+                label="Upload Image / 上传图像", 
+                elem_id="input-image",
+                height=320
+            )
+            
+            # 添加双语标签 - 提示词
+            prompt = gr.Textbox(
+                label="Prompt / 提示词", 
+                value='',
+                elem_id="prompt-input"
+            )
+            
+            # 添加双语标签 - 快速提示词
+            example_quick_prompts = gr.Dataset(
+                samples=quick_prompts, 
+                label='Quick Prompts / 快速提示词列表', 
+                samples_per_page=1000, 
+                components=[prompt]
+            )
             example_quick_prompts.click(lambda x: x[0], inputs=[example_quick_prompts], outputs=prompt, show_progress=False, queue=False)
 
-            with gr.Row():
-                start_button = gr.Button(value="开始生成")
-                end_button = gr.Button(value="结束生成", interactive=False)
+            # 按钮添加样式和双语标签
+            with gr.Row(elem_classes="button-container"):
+                start_button = gr.Button(
+                    value="Generate / 开始生成", 
+                    elem_classes="start-btn", 
+                    elem_id="start-button",
+                    variant="primary"
+                )
+                
+                end_button = gr.Button(
+                    value="Stop / 结束生成", 
+                    elem_classes="stop-btn", 
+                    elem_id="stop-button",
+                    interactive=False
+                )
 
+            # 参数设置区域
             with gr.Group():
-                use_teacache = gr.Checkbox(label='使用TeaCache', value=True, info='速度更快，但可能会使手指和手的生成效果稍差。')
+                use_teacache = gr.Checkbox(
+                    label='Use TeaCache / 使用TeaCache', 
+                    value=True, 
+                    info='Faster speed, but may result in slightly worse finger and hand generation. / 速度更快，但可能会使手指和手的生成效果稍差。'
+                )
 
-                n_prompt = gr.Textbox(label="负面提示词", value="", visible=False)  # Not used
-                seed = gr.Number(label="随机种子", value=31337, precision=0)
+                n_prompt = gr.Textbox(label="Negative Prompt / 负面提示词", value="", visible=False)  # Not used
+                
+                seed = gr.Number(
+                    label="Seed / 随机种子", 
+                    value=31337, 
+                    precision=0
+                )
 
-                total_second_length = gr.Slider(label="视频长度(秒)", minimum=1, maximum=120, value=5, step=0.1)
-                latent_window_size = gr.Slider(label="潜在窗口大小", minimum=1, maximum=33, value=9, step=1, visible=False)  # Should not change
-                steps = gr.Slider(label="推理步数", minimum=1, maximum=100, value=25, step=1, info='不建议修改此值。')
+                # 添加slider-container类以便CSS触摸优化
+                with gr.Group(elem_classes="slider-container"):
+                    total_second_length = gr.Slider(
+                        label="Video Length (seconds) / 视频长度(秒)", 
+                        minimum=1, 
+                        maximum=120, 
+                        value=5, 
+                        step=0.1
+                    )
+                    
+                    latent_window_size = gr.Slider(
+                        label="Latent Window Size / 潜在窗口大小", 
+                        minimum=1, 
+                        maximum=33, 
+                        value=9, 
+                        step=1, 
+                        visible=False
+                    )
+                    
+                    steps = gr.Slider(
+                        label="Inference Steps / 推理步数", 
+                        minimum=1, 
+                        maximum=100, 
+                        value=25, 
+                        step=1, 
+                        info='Changing this value is not recommended. / 不建议修改此值。'
+                    )
 
-                cfg = gr.Slider(label="CFG Scale", minimum=1.0, maximum=32.0, value=1.0, step=0.01, visible=False)  # Should not change
-                gs = gr.Slider(label="蒸馏CFG比例", minimum=1.0, maximum=32.0, value=10.0, step=0.01, info='不建议修改此值。')
-                rs = gr.Slider(label="CFG重缩放", minimum=0.0, maximum=1.0, value=0.0, step=0.01, visible=False)  # Should not change
+                    cfg = gr.Slider(
+                        label="CFG Scale", 
+                        minimum=1.0, 
+                        maximum=32.0, 
+                        value=1.0, 
+                        step=0.01, 
+                        visible=False
+                    )
+                    
+                    gs = gr.Slider(
+                        label="Distilled CFG Scale / 蒸馏CFG比例", 
+                        minimum=1.0, 
+                        maximum=32.0, 
+                        value=10.0, 
+                        step=0.01, 
+                        info='Changing this value is not recommended. / 不建议修改此值。'
+                    )
+                    
+                    rs = gr.Slider(
+                        label="CFG Rescale / CFG重缩放", 
+                        minimum=0.0, 
+                        maximum=1.0, 
+                        value=0.0, 
+                        step=0.01, 
+                        visible=False
+                    )
 
-                gpu_memory_preservation = gr.Slider(label="GPU推理保留内存(GB)(值越大速度越慢)", minimum=6, maximum=128, value=6, step=0.1, info="如果出现OOM错误，请将此值设置得更大。值越大，速度越慢。")
+                    gpu_memory_preservation = gr.Slider(
+                        label="GPU Memory (GB) / GPU推理保留内存(GB)", 
+                        minimum=6, 
+                        maximum=128, 
+                        value=6, 
+                        step=0.1, 
+                        info="Set this to a larger value if you encounter OOM errors. Larger values cause slower speed. / 如果出现OOM错误，请将此值设置得更大。值越大，速度越慢。"
+                    )
 
-        with gr.Column():
-            preview_image = gr.Image(label="下一批潜变量", height=200, visible=False)
-            result_video = gr.Video(label="生成的视频", autoplay=True, show_share_button=False, height=512, loop=True)
-            gr.Markdown('注意：由于采样是倒序的，结束动作将在开始动作之前生成。如果视频中没有出现起始动作，请继续等待，它将在稍后生成。')
-            progress_desc = gr.Markdown('', elem_classes='no-generating-animation')
-            progress_bar = gr.HTML('', elem_classes='no-generating-animation')
+        # 右侧预览和结果列
+        with gr.Column(scale=1, elem_classes="mobile-full-width"):
+            # 预览图像
+            preview_image = gr.Image(
+                label="Preview / 预览", 
+                height=200, 
+                visible=False,
+                elem_classes="preview-container"
+            )
+            
+            # 视频结果容器
+            result_video = gr.Video(
+                label="Generated Video / 生成的视频", 
+                autoplay=True, 
+                show_share_button=True,  # 添加分享按钮
+                height=512, 
+                loop=True,
+                elem_classes="video-container",
+                elem_id="result-video"
+            )
+            
+            # 双语说明
+            gr.HTML("<div data-i18n='sampling_note' class='note'>Note: Due to reversed sampling, ending actions will be generated before starting actions. If the starting action is not in the video, please wait, it will be generated later.</div>")
+            
+            # 进度指示器
+            with gr.Group(elem_classes="progress-container"):
+                progress_desc = gr.Markdown('', elem_classes='no-generating-animation')
+                progress_bar = gr.HTML('', elem_classes='no-generating-animation')
+            
+            # 错误信息区域
+            error_message = gr.Markdown('', elem_id='error-message')
+    
+    # 处理函数
     ips = [input_image, prompt, n_prompt, seed, total_second_length, latent_window_size, steps, cfg, gs, rs, gpu_memory_preservation, use_teacache]
+    
+    # 开始和结束按钮事件
     start_button.click(fn=process, inputs=ips, outputs=[result_video, preview_image, progress_desc, progress_bar, start_button, end_button])
     end_button.click(fn=end_process)
+
+
+# 创建一个自定义CSS，增加响应式布局支持
+def make_custom_css():
+    progress_bar_css = make_progress_bar_css()
+    
+    responsive_css = """
+    /* 基础响应式设置 */
+    #app-container {
+        max-width: 100%;
+        margin: 0 auto;
+    }
+    
+    /* 语言切换按钮样式 */
+    #language-toggle {
+        position: fixed;
+        top: 10px;
+        right: 10px;
+        z-index: 1000;
+        background-color: rgba(0, 0, 0, 0.7);
+        color: white;
+        border: none;
+        border-radius: 4px;
+        padding: 5px 10px;
+        cursor: pointer;
+        font-size: 14px;
+    }
+    
+    /* 页面标题样式 */
+    h1 {
+        font-size: 2rem;
+        text-align: center;
+        margin-bottom: 1rem;
+    }
+    
+    /* 按钮样式 */
+    .start-btn, .stop-btn {
+        min-height: 45px;
+        font-size: 1rem;
+    }
+    
+    /* 移动设备样式 - 小屏幕 */
+    @media (max-width: 768px) {
+        h1 {
+            font-size: 1.5rem;
+            margin-bottom: 0.5rem;
+        }
+        
+        /* 单列布局 */
+        .mobile-full-width {
+            flex-direction: column !important;
+        }
+        
+        .mobile-full-width > .gr-block {
+            min-width: 100% !important;
+            flex-grow: 1;
+        }
+        
+        /* 调整视频大小 */
+        .video-container {
+            height: auto !important;
+        }
+        
+        /* 调整按钮大小 */
+        .button-container button {
+            min-height: 50px;
+            font-size: 1rem;
+            touch-action: manipulation;
+        }
+        
+        /* 调整滑块 */
+        .slider-container input[type="range"] {
+            height: 30px;
+        }
+    }
+    
+    /* 平板设备样式 */
+    @media (min-width: 769px) and (max-width: 1024px) {
+        .tablet-adjust {
+            width: 48% !important;
+        }
+    }
+    
+    /* 黑暗模式支持 */
+    @media (prefers-color-scheme: dark) {
+        .dark-mode-text {
+            color: #f0f0f0;
+        }
+        
+        .dark-mode-bg {
+            background-color: #2a2a2a;
+        }
+    }
+    
+    /* 增强可访问性 */
+    button, input, select, textarea {
+        font-size: 16px; /* 防止iOS缩放 */
+    }
+    
+    /* 触摸优化 */
+    button, .interactive-element {
+        min-height: 44px;
+        min-width: 44px;
+    }
+    
+    /* 提高对比度 */
+    .high-contrast {
+        color: #fff;
+        background-color: #000;
+    }
+    
+    /* 进度条样式增强 */
+    .progress-container {
+        margin-top: 10px;
+        margin-bottom: 10px;
+    }
+    
+    /* 错误消息样式 */
+    #error-message {
+        color: #ff4444;
+        font-weight: bold;
+        padding: 10px;
+        border-radius: 4px;
+        margin-top: 10px;
+        background-color: rgba(255, 0, 0, 0.1);
+    }
+    """
+    
+    # 合并CSS
+    combined_css = progress_bar_css + responsive_css
+    return combined_css
 
 
 block.launch() 
