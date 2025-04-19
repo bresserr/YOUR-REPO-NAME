@@ -105,13 +105,39 @@ import math
 # 检查是否在Hugging Face Space环境中
 IN_HF_SPACE = os.environ.get('SPACE_ID') is not None
 
+# 添加变量跟踪GPU可用性
+GPU_AVAILABLE = False
+GPU_INITIALIZED = False
+last_update_time = time.time()
+
 # 如果在Hugging Face Space中，导入spaces模块
 if IN_HF_SPACE:
     try:
         import spaces
         print("在Hugging Face Space环境中运行，已导入spaces模块")
+        
+        # 检查GPU可用性
+        try:
+            GPU_AVAILABLE = torch.cuda.is_available()
+            print(f"GPU available: {GPU_AVAILABLE}")
+            if GPU_AVAILABLE:
+                print(f"GPU device name: {torch.cuda.get_device_name(0)}")
+                print(f"GPU memory: {torch.cuda.get_device_properties(0).total_memory / 1e9} GB")
+                
+                # 尝试进行小型GPU操作，确认GPU实际可用
+                test_tensor = torch.zeros(1, device='cuda')
+                test_tensor = test_tensor + 1
+                del test_tensor
+                print("成功进行GPU测试操作")
+            else:
+                print("警告: CUDA报告可用，但未检测到GPU设备")
+        except Exception as e:
+            GPU_AVAILABLE = False
+            print(f"检查GPU时出错: {e}")
+            print("将使用CPU模式运行")
     except ImportError:
         print("未能导入spaces模块，可能不在Hugging Face Space环境中")
+        GPU_AVAILABLE = torch.cuda.is_available()
 
 from PIL import Image
 from diffusers import AutoencoderKLHunyuanVideo
@@ -149,95 +175,194 @@ if not IN_HF_SPACE:
 else:
     # 在Spaces环境中使用默认值
     print("在Spaces环境中使用默认内存设置")
-    free_mem_gb = 60.0  # 默认在Spaces中使用较高的值
-    high_vram = True
-    print(f'High-VRAM Mode: {high_vram}')
+    try:
+        if GPU_AVAILABLE:
+            free_mem_gb = torch.cuda.get_device_properties(0).total_memory / 1e9 * 0.9  # 使用90%的GPU内存
+            high_vram = free_mem_gb > 10  # 更保守的条件
+        else:
+            free_mem_gb = 6.0  # 默认值
+            high_vram = False
+    except Exception as e:
+        print(f"获取GPU内存时出错: {e}")
+        free_mem_gb = 6.0  # 默认值
+        high_vram = False
+    
+    print(f'GPU内存: {free_mem_gb:.2f} GB, High-VRAM Mode: {high_vram}')
 
 # 使用models变量存储全局模型引用
 models = {}
+cpu_fallback_mode = not GPU_AVAILABLE  # 如果GPU不可用，使用CPU回退模式
 
 # 使用加载模型的函数
 def load_models():
-    global models
+    global models, cpu_fallback_mode, GPU_INITIALIZED
+    
+    if GPU_INITIALIZED:
+        print("模型已加载，跳过重复加载")
+        return models
     
     print("开始加载模型...")
     
-    # 加载模型
-    text_encoder = LlamaModel.from_pretrained("hunyuanvideo-community/HunyuanVideo", subfolder='text_encoder', torch_dtype=torch.float16).cpu()
-    text_encoder_2 = CLIPTextModel.from_pretrained("hunyuanvideo-community/HunyuanVideo", subfolder='text_encoder_2', torch_dtype=torch.float16).cpu()
-    tokenizer = LlamaTokenizerFast.from_pretrained("hunyuanvideo-community/HunyuanVideo", subfolder='tokenizer')
-    tokenizer_2 = CLIPTokenizer.from_pretrained("hunyuanvideo-community/HunyuanVideo", subfolder='tokenizer_2')
-    vae = AutoencoderKLHunyuanVideo.from_pretrained("hunyuanvideo-community/HunyuanVideo", subfolder='vae', torch_dtype=torch.float16).cpu()
+    try:
+        # 设置设备，根据GPU可用性确定
+        device = 'cuda' if GPU_AVAILABLE and not cpu_fallback_mode else 'cpu'
+        model_device = 'cpu'  # 初始加载到CPU
+        
+        # 降低精度以节省内存
+        dtype = torch.float16 if GPU_AVAILABLE else torch.float32
+        transformer_dtype = torch.bfloat16 if GPU_AVAILABLE else torch.float32
+        
+        print(f"使用设备: {device}, 模型精度: {dtype}, Transformer精度: {transformer_dtype}")
+        
+        # 加载模型
+        try:
+            text_encoder = LlamaModel.from_pretrained("hunyuanvideo-community/HunyuanVideo", subfolder='text_encoder', torch_dtype=dtype).to(model_device)
+            text_encoder_2 = CLIPTextModel.from_pretrained("hunyuanvideo-community/HunyuanVideo", subfolder='text_encoder_2', torch_dtype=dtype).to(model_device)
+            tokenizer = LlamaTokenizerFast.from_pretrained("hunyuanvideo-community/HunyuanVideo", subfolder='tokenizer')
+            tokenizer_2 = CLIPTokenizer.from_pretrained("hunyuanvideo-community/HunyuanVideo", subfolder='tokenizer_2')
+            vae = AutoencoderKLHunyuanVideo.from_pretrained("hunyuanvideo-community/HunyuanVideo", subfolder='vae', torch_dtype=dtype).to(model_device)
 
-    feature_extractor = SiglipImageProcessor.from_pretrained("lllyasviel/flux_redux_bfl", subfolder='feature_extractor')
-    image_encoder = SiglipVisionModel.from_pretrained("lllyasviel/flux_redux_bfl", subfolder='image_encoder', torch_dtype=torch.float16).cpu()
+            feature_extractor = SiglipImageProcessor.from_pretrained("lllyasviel/flux_redux_bfl", subfolder='feature_extractor')
+            image_encoder = SiglipVisionModel.from_pretrained("lllyasviel/flux_redux_bfl", subfolder='image_encoder', torch_dtype=dtype).to(model_device)
 
-    transformer = HunyuanVideoTransformer3DModelPacked.from_pretrained('lllyasviel/FramePackI2V_HY', torch_dtype=torch.bfloat16).cpu()
+            transformer = HunyuanVideoTransformer3DModelPacked.from_pretrained('lllyasviel/FramePackI2V_HY', torch_dtype=transformer_dtype).to(model_device)
+            
+            print("成功加载所有模型")
+        except Exception as e:
+            print(f"加载模型时出错: {e}")
+            print("尝试降低精度重新加载...")
+            
+            # 降低精度重试
+            dtype = torch.float32
+            transformer_dtype = torch.float32
+            cpu_fallback_mode = True
+            
+            text_encoder = LlamaModel.from_pretrained("hunyuanvideo-community/HunyuanVideo", subfolder='text_encoder', torch_dtype=dtype).to('cpu')
+            text_encoder_2 = CLIPTextModel.from_pretrained("hunyuanvideo-community/HunyuanVideo", subfolder='text_encoder_2', torch_dtype=dtype).to('cpu')
+            tokenizer = LlamaTokenizerFast.from_pretrained("hunyuanvideo-community/HunyuanVideo", subfolder='tokenizer')
+            tokenizer_2 = CLIPTokenizer.from_pretrained("hunyuanvideo-community/HunyuanVideo", subfolder='tokenizer_2')
+            vae = AutoencoderKLHunyuanVideo.from_pretrained("hunyuanvideo-community/HunyuanVideo", subfolder='vae', torch_dtype=dtype).to('cpu')
 
-    vae.eval()
-    text_encoder.eval()
-    text_encoder_2.eval()
-    image_encoder.eval()
-    transformer.eval()
+            feature_extractor = SiglipImageProcessor.from_pretrained("lllyasviel/flux_redux_bfl", subfolder='feature_extractor')
+            image_encoder = SiglipVisionModel.from_pretrained("lllyasviel/flux_redux_bfl", subfolder='image_encoder', torch_dtype=dtype).to('cpu')
 
-    if not high_vram:
-        vae.enable_slicing()
-        vae.enable_tiling()
+            transformer = HunyuanVideoTransformer3DModelPacked.from_pretrained('lllyasviel/FramePackI2V_HY', torch_dtype=transformer_dtype).to('cpu')
+            
+            print("使用CPU模式成功加载所有模型")
 
-    transformer.high_quality_fp32_output_for_inference = True
-    print('transformer.high_quality_fp32_output_for_inference = True')
+        vae.eval()
+        text_encoder.eval()
+        text_encoder_2.eval()
+        image_encoder.eval()
+        transformer.eval()
 
-    transformer.to(dtype=torch.bfloat16)
-    vae.to(dtype=torch.float16)
-    image_encoder.to(dtype=torch.float16)
-    text_encoder.to(dtype=torch.float16)
-    text_encoder_2.to(dtype=torch.float16)
+        if not high_vram or cpu_fallback_mode:
+            vae.enable_slicing()
+            vae.enable_tiling()
 
-    vae.requires_grad_(False)
-    text_encoder.requires_grad_(False)
-    text_encoder_2.requires_grad_(False)
-    image_encoder.requires_grad_(False)
-    transformer.requires_grad_(False)
+        transformer.high_quality_fp32_output_for_inference = True
+        print('transformer.high_quality_fp32_output_for_inference = True')
 
-    if torch.cuda.is_available():
-        if not high_vram:
-            # DynamicSwapInstaller is same as huggingface's enable_sequential_offload but 3x faster
-            DynamicSwapInstaller.install_model(transformer, device=gpu)
-            DynamicSwapInstaller.install_model(text_encoder, device=gpu)
-        else:
-            text_encoder.to(gpu)
-            text_encoder_2.to(gpu)
-            image_encoder.to(gpu)
-            vae.to(gpu)
-            transformer.to(gpu)
-    
-    # 保存到全局变量
-    models = {
-        'text_encoder': text_encoder,
-        'text_encoder_2': text_encoder_2,
-        'tokenizer': tokenizer,
-        'tokenizer_2': tokenizer_2,
-        'vae': vae,
-        'feature_extractor': feature_extractor,
-        'image_encoder': image_encoder,
-        'transformer': transformer
-    }
-    
-    return models
+        # 设置模型精度
+        if not cpu_fallback_mode:
+            transformer.to(dtype=transformer_dtype)
+            vae.to(dtype=dtype)
+            image_encoder.to(dtype=dtype)
+            text_encoder.to(dtype=dtype)
+            text_encoder_2.to(dtype=dtype)
+
+        vae.requires_grad_(False)
+        text_encoder.requires_grad_(False)
+        text_encoder_2.requires_grad_(False)
+        image_encoder.requires_grad_(False)
+        transformer.requires_grad_(False)
+
+        if torch.cuda.is_available() and not cpu_fallback_mode:
+            try:
+                if not high_vram:
+                    # DynamicSwapInstaller is same as huggingface's enable_sequential_offload but 3x faster
+                    DynamicSwapInstaller.install_model(transformer, device=device)
+                    DynamicSwapInstaller.install_model(text_encoder, device=device)
+                else:
+                    text_encoder.to(device)
+                    text_encoder_2.to(device)
+                    image_encoder.to(device)
+                    vae.to(device)
+                    transformer.to(device)
+                print(f"成功将模型移动到{device}设备")
+            except Exception as e:
+                print(f"移动模型到{device}时出错: {e}")
+                print("回退到CPU模式")
+                cpu_fallback_mode = True
+        
+        # 保存到全局变量
+        models = {
+            'text_encoder': text_encoder,
+            'text_encoder_2': text_encoder_2,
+            'tokenizer': tokenizer,
+            'tokenizer_2': tokenizer_2,
+            'vae': vae,
+            'feature_extractor': feature_extractor,
+            'image_encoder': image_encoder,
+            'transformer': transformer
+        }
+        
+        GPU_INITIALIZED = True
+        print(f"模型加载完成，运行模式: {'CPU' if cpu_fallback_mode else 'GPU'}")
+        return models
+    except Exception as e:
+        print(f"加载模型过程中发生错误: {e}")
+        traceback.print_exc()
+        
+        # 记录更详细的错误信息
+        error_info = {
+            "error": str(e),
+            "traceback": traceback.format_exc(),
+            "cuda_available": torch.cuda.is_available(),
+            "device": "cpu" if cpu_fallback_mode else "cuda",
+        }
+        
+        # 保存错误信息到文件，方便排查
+        try:
+            with open(os.path.join(outputs_folder, "error_log.txt"), "w") as f:
+                f.write(str(error_info))
+        except:
+            pass
+            
+        # 返回空字典，允许应用继续尝试运行
+        cpu_fallback_mode = True
+        return {}
 
 
 # 使用Hugging Face Spaces GPU装饰器
-if IN_HF_SPACE and 'spaces' in globals():
-    @spaces.GPU
-    def initialize_models():
-        """在@spaces.GPU装饰器内初始化模型"""
-        return load_models()
+if IN_HF_SPACE and 'spaces' in globals() and GPU_AVAILABLE:
+    try:
+        @spaces.GPU
+        def initialize_models():
+            """在@spaces.GPU装饰器内初始化模型"""
+            global GPU_INITIALIZED
+            try:
+                result = load_models()
+                GPU_INITIALIZED = True
+                return result
+            except Exception as e:
+                print(f"使用spaces.GPU初始化模型时出错: {e}")
+                traceback.print_exc()
+                global cpu_fallback_mode
+                cpu_fallback_mode = True
+                # 不使用装饰器再次尝试
+                return load_models()
+    except Exception as e:
+        print(f"创建spaces.GPU装饰器时出错: {e}")
+        # 如果装饰器出错，直接使用非装饰器版本
+        def initialize_models():
+            return load_models()
 
 
 # 以下函数内部会延迟获取模型
 def get_models():
     """获取模型，如果尚未加载则加载模型"""
-    global models
+    global models, GPU_INITIALIZED
     
     # 添加模型加载锁，防止并发加载
     model_loading_key = "__model_loading__"
@@ -248,20 +373,37 @@ def get_models():
             print("模型正在加载中，等待...")
             # 等待模型加载完成
             import time
+            start_wait = time.time()
             while not models and model_loading_key in globals():
                 time.sleep(0.5)
-            return models
+                # 超过60秒认为加载失败
+                if time.time() - start_wait > 60:
+                    print("等待模型加载超时")
+                    break
+            
+            if models:
+                return models
             
         try:
             # 设置加载标记
             globals()[model_loading_key] = True
             
-            if IN_HF_SPACE and 'spaces' in globals():
-                print("使用@spaces.GPU装饰器加载模型")
-                models = initialize_models()
+            if IN_HF_SPACE and 'spaces' in globals() and GPU_AVAILABLE and not cpu_fallback_mode:
+                try:
+                    print("使用@spaces.GPU装饰器加载模型")
+                    models = initialize_models()
+                except Exception as e:
+                    print(f"使用GPU装饰器加载模型失败: {e}")
+                    print("尝试直接加载模型")
+                    models = load_models()
             else:
                 print("直接加载模型")
-                load_models()
+                models = load_models()
+        except Exception as e:
+            print(f"加载模型时发生未预期的错误: {e}")
+            traceback.print_exc()
+            # 确保有一个空字典
+            models = {}
         finally:
             # 无论成功与否，都移除加载标记
             if model_loading_key in globals():
@@ -275,16 +417,46 @@ stream = AsyncStream()
 
 @torch.no_grad()
 def worker(input_image, prompt, n_prompt, seed, total_second_length, latent_window_size, steps, cfg, gs, rs, gpu_memory_preservation, use_teacache):
+    global last_update_time
+    last_update_time = time.time()
+    
     # 获取模型
-    models = get_models()
-    text_encoder = models['text_encoder']
-    text_encoder_2 = models['text_encoder_2']
-    tokenizer = models['tokenizer']
-    tokenizer_2 = models['tokenizer_2']
-    vae = models['vae']
-    feature_extractor = models['feature_extractor']
-    image_encoder = models['image_encoder']
-    transformer = models['transformer']
+    try:
+        models = get_models()
+        if not models:
+            error_msg = "模型加载失败，请检查日志获取详细信息"
+            print(error_msg)
+            stream.output_queue.push(('error', error_msg))
+            stream.output_queue.push(('end', None))
+            return
+        
+        text_encoder = models['text_encoder']
+        text_encoder_2 = models['text_encoder_2']
+        tokenizer = models['tokenizer']
+        tokenizer_2 = models['tokenizer_2']
+        vae = models['vae']
+        feature_extractor = models['feature_extractor']
+        image_encoder = models['image_encoder']
+        transformer = models['transformer']
+    except Exception as e:
+        error_msg = f"获取模型时出错: {e}"
+        print(error_msg)
+        traceback.print_exc()
+        stream.output_queue.push(('error', error_msg))
+        stream.output_queue.push(('end', None))
+        return
+    
+    # 确定设备
+    device = 'cuda' if GPU_AVAILABLE and not cpu_fallback_mode else 'cpu'
+    print(f"使用设备: {device} 进行推理")
+    
+    # 调整参数以适应CPU模式
+    if cpu_fallback_mode:
+        print("CPU模式下使用更精简的参数")
+        # 减小处理大小以加快CPU处理
+        latent_window_size = min(latent_window_size, 5)
+        steps = min(steps, 15)  # 减少步数
+        total_second_length = min(total_second_length, 2.0)  # 限制视频长度
     
     total_latent_sections = (total_second_length * 30) / (latent_window_size * 4)
     total_latent_sections = int(max(round(total_latent_sections), 1))
@@ -299,79 +471,136 @@ def worker(input_image, prompt, n_prompt, seed, total_second_length, latent_wind
 
     try:
         # Clean GPU
-        if not high_vram:
-            unload_complete_models(
-                text_encoder, text_encoder_2, image_encoder, vae, transformer
-            )
+        if not high_vram and not cpu_fallback_mode:
+            try:
+                unload_complete_models(
+                    text_encoder, text_encoder_2, image_encoder, vae, transformer
+                )
+            except Exception as e:
+                print(f"卸载模型时出错: {e}")
+                # 继续执行，不中断流程
 
         # Text encoding
-
+        last_update_time = time.time()
         stream.output_queue.push(('progress', (None, '', make_progress_bar_html(0, 'Text encoding ...'))))
 
-        if not high_vram:
-            fake_diffusers_current_device(text_encoder, gpu)  # since we only encode one text - that is one model move and one encode, offload is same time consumption since it is also one load and one encode.
-            load_model_as_complete(text_encoder_2, target_device=gpu)
+        try:
+            if not high_vram and not cpu_fallback_mode:
+                fake_diffusers_current_device(text_encoder, device)
+                load_model_as_complete(text_encoder_2, target_device=device)
 
-        llama_vec, clip_l_pooler = encode_prompt_conds(prompt, text_encoder, text_encoder_2, tokenizer, tokenizer_2)
+            llama_vec, clip_l_pooler = encode_prompt_conds(prompt, text_encoder, text_encoder_2, tokenizer, tokenizer_2)
 
-        if cfg == 1:
-            llama_vec_n, clip_l_pooler_n = torch.zeros_like(llama_vec), torch.zeros_like(clip_l_pooler)
-        else:
-            llama_vec_n, clip_l_pooler_n = encode_prompt_conds(n_prompt, text_encoder, text_encoder_2, tokenizer, tokenizer_2)
+            if cfg == 1:
+                llama_vec_n, clip_l_pooler_n = torch.zeros_like(llama_vec), torch.zeros_like(clip_l_pooler)
+            else:
+                llama_vec_n, clip_l_pooler_n = encode_prompt_conds(n_prompt, text_encoder, text_encoder_2, tokenizer, tokenizer_2)
 
-        llama_vec, llama_attention_mask = crop_or_pad_yield_mask(llama_vec, length=512)
-        llama_vec_n, llama_attention_mask_n = crop_or_pad_yield_mask(llama_vec_n, length=512)
+            llama_vec, llama_attention_mask = crop_or_pad_yield_mask(llama_vec, length=512)
+            llama_vec_n, llama_attention_mask_n = crop_or_pad_yield_mask(llama_vec_n, length=512)
+        except Exception as e:
+            error_msg = f"文本编码过程出错: {e}"
+            print(error_msg)
+            traceback.print_exc()
+            stream.output_queue.push(('error', error_msg))
+            stream.output_queue.push(('end', None))
+            return
 
         # Processing input image
-
+        last_update_time = time.time()
         stream.output_queue.push(('progress', (None, '', make_progress_bar_html(0, 'Image processing ...'))))
 
-        H, W, C = input_image.shape
-        height, width = find_nearest_bucket(H, W, resolution=640)
-        input_image_np = resize_and_center_crop(input_image, target_width=width, target_height=height)
+        try:
+            H, W, C = input_image.shape
+            height, width = find_nearest_bucket(H, W, resolution=640)
+            
+            # 如果是CPU模式，缩小处理尺寸
+            if cpu_fallback_mode:
+                height = min(height, 320)
+                width = min(width, 320)
+                
+            input_image_np = resize_and_center_crop(input_image, target_width=width, target_height=height)
 
-        Image.fromarray(input_image_np).save(os.path.join(outputs_folder, f'{job_id}.png'))
+            Image.fromarray(input_image_np).save(os.path.join(outputs_folder, f'{job_id}.png'))
 
-        input_image_pt = torch.from_numpy(input_image_np).float() / 127.5 - 1
-        input_image_pt = input_image_pt.permute(2, 0, 1)[None, :, None]
+            input_image_pt = torch.from_numpy(input_image_np).float() / 127.5 - 1
+            input_image_pt = input_image_pt.permute(2, 0, 1)[None, :, None]
+        except Exception as e:
+            error_msg = f"图像处理过程出错: {e}"
+            print(error_msg)
+            traceback.print_exc()
+            stream.output_queue.push(('error', error_msg))
+            stream.output_queue.push(('end', None))
+            return
 
         # VAE encoding
-
+        last_update_time = time.time()
         stream.output_queue.push(('progress', (None, '', make_progress_bar_html(0, 'VAE encoding ...'))))
 
-        if not high_vram:
-            load_model_as_complete(vae, target_device=gpu)
+        try:
+            if not high_vram and not cpu_fallback_mode:
+                load_model_as_complete(vae, target_device=device)
 
-        start_latent = vae_encode(input_image_pt, vae)
+            start_latent = vae_encode(input_image_pt, vae)
+        except Exception as e:
+            error_msg = f"VAE编码过程出错: {e}"
+            print(error_msg)
+            traceback.print_exc()
+            stream.output_queue.push(('error', error_msg))
+            stream.output_queue.push(('end', None))
+            return
 
         # CLIP Vision
-
+        last_update_time = time.time()
         stream.output_queue.push(('progress', (None, '', make_progress_bar_html(0, 'CLIP Vision encoding ...'))))
 
-        if not high_vram:
-            load_model_as_complete(image_encoder, target_device=gpu)
+        try:
+            if not high_vram and not cpu_fallback_mode:
+                load_model_as_complete(image_encoder, target_device=device)
 
-        image_encoder_output = hf_clip_vision_encode(input_image_np, feature_extractor, image_encoder)
-        image_encoder_last_hidden_state = image_encoder_output.last_hidden_state
+            image_encoder_output = hf_clip_vision_encode(input_image_np, feature_extractor, image_encoder)
+            image_encoder_last_hidden_state = image_encoder_output.last_hidden_state
+        except Exception as e:
+            error_msg = f"CLIP Vision编码过程出错: {e}"
+            print(error_msg)
+            traceback.print_exc()
+            stream.output_queue.push(('error', error_msg))
+            stream.output_queue.push(('end', None))
+            return
 
         # Dtype
-
-        llama_vec = llama_vec.to(transformer.dtype)
-        llama_vec_n = llama_vec_n.to(transformer.dtype)
-        clip_l_pooler = clip_l_pooler.to(transformer.dtype)
-        clip_l_pooler_n = clip_l_pooler_n.to(transformer.dtype)
-        image_encoder_last_hidden_state = image_encoder_last_hidden_state.to(transformer.dtype)
+        try:
+            llama_vec = llama_vec.to(transformer.dtype)
+            llama_vec_n = llama_vec_n.to(transformer.dtype)
+            clip_l_pooler = clip_l_pooler.to(transformer.dtype)
+            clip_l_pooler_n = clip_l_pooler_n.to(transformer.dtype)
+            image_encoder_last_hidden_state = image_encoder_last_hidden_state.to(transformer.dtype)
+        except Exception as e:
+            error_msg = f"数据类型转换出错: {e}"
+            print(error_msg)
+            traceback.print_exc()
+            stream.output_queue.push(('error', error_msg))
+            stream.output_queue.push(('end', None))
+            return
 
         # Sampling
-
+        last_update_time = time.time()
         stream.output_queue.push(('progress', (None, '', make_progress_bar_html(0, 'Start sampling ...'))))
 
         rnd = torch.Generator("cpu").manual_seed(seed)
         num_frames = latent_window_size * 4 - 3
 
-        history_latents = torch.zeros(size=(1, 16, 1 + 2 + 16, height // 8, width // 8), dtype=torch.float32).cpu()
-        history_pixels = None
-        total_generated_latent_frames = 0
+        try:
+            history_latents = torch.zeros(size=(1, 16, 1 + 2 + 16, height // 8, width // 8), dtype=torch.float32).cpu()
+            history_pixels = None
+            total_generated_latent_frames = 0
+        except Exception as e:
+            error_msg = f"初始化历史状态出错: {e}"
+            print(error_msg)
+            traceback.print_exc()
+            stream.output_queue.push(('error', error_msg))
+            stream.output_queue.push(('end', None))
+            return
 
         latent_paddings = reversed(range(total_latent_sections))
 
@@ -383,6 +612,7 @@ def worker(input_image, prompt, n_prompt, seed, total_second_length, latent_wind
             latent_paddings = [3] + [2] * (total_latent_sections - 3) + [1, 0]
 
         for latent_padding in latent_paddings:
+            last_update_time = time.time()
             is_last_section = latent_padding == 0
             latent_padding_size = latent_padding * latent_window_size
 
@@ -401,42 +631,70 @@ def worker(input_image, prompt, n_prompt, seed, total_second_length, latent_wind
 
             print(f'latent_padding_size = {latent_padding_size}, is_last_section = {is_last_section}')
 
-            indices = torch.arange(0, sum([1, latent_padding_size, latent_window_size, 1, 2, 16])).unsqueeze(0)
-            clean_latent_indices_pre, blank_indices, latent_indices, clean_latent_indices_post, clean_latent_2x_indices, clean_latent_4x_indices = indices.split([1, latent_padding_size, latent_window_size, 1, 2, 16], dim=1)
-            clean_latent_indices = torch.cat([clean_latent_indices_pre, clean_latent_indices_post], dim=1)
+            try:
+                indices = torch.arange(0, sum([1, latent_padding_size, latent_window_size, 1, 2, 16])).unsqueeze(0)
+                clean_latent_indices_pre, blank_indices, latent_indices, clean_latent_indices_post, clean_latent_2x_indices, clean_latent_4x_indices = indices.split([1, latent_padding_size, latent_window_size, 1, 2, 16], dim=1)
+                clean_latent_indices = torch.cat([clean_latent_indices_pre, clean_latent_indices_post], dim=1)
 
-            clean_latents_pre = start_latent.to(history_latents)
-            clean_latents_post, clean_latents_2x, clean_latents_4x = history_latents[:, :, :1 + 2 + 16, :, :].split([1, 2, 16], dim=2)
-            clean_latents = torch.cat([clean_latents_pre, clean_latents_post], dim=2)
+                clean_latents_pre = start_latent.to(history_latents)
+                clean_latents_post, clean_latents_2x, clean_latents_4x = history_latents[:, :, :1 + 2 + 16, :, :].split([1, 2, 16], dim=2)
+                clean_latents = torch.cat([clean_latents_pre, clean_latents_post], dim=2)
+            except Exception as e:
+                error_msg = f"准备采样数据时出错: {e}"
+                print(error_msg)
+                traceback.print_exc()
+                # 尝试继续下一轮迭代而不是完全终止
+                if last_output_filename:
+                    stream.output_queue.push(('file', last_output_filename))
+                continue
 
-            if not high_vram:
-                unload_complete_models()
-                move_model_to_device_with_memory_preservation(transformer, target_device=gpu, preserved_memory_gb=gpu_memory_preservation)
+            if not high_vram and not cpu_fallback_mode:
+                try:
+                    unload_complete_models()
+                    move_model_to_device_with_memory_preservation(transformer, target_device=device, preserved_memory_gb=gpu_memory_preservation)
+                except Exception as e:
+                    print(f"移动transformer到GPU时出错: {e}")
+                    # 继续执行，可能影响性能但不必终止
 
-            if use_teacache:
-                transformer.initialize_teacache(enable_teacache=True, num_steps=steps)
+            if use_teacache and not cpu_fallback_mode:
+                try:
+                    transformer.initialize_teacache(enable_teacache=True, num_steps=steps)
+                except Exception as e:
+                    print(f"初始化teacache时出错: {e}")
+                    # 禁用teacache并继续
+                    transformer.initialize_teacache(enable_teacache=False)
             else:
                 transformer.initialize_teacache(enable_teacache=False)
 
             def callback(d):
-                preview = d['denoised']
-                preview = vae_decode_fake(preview)
+                global last_update_time
+                last_update_time = time.time()
+                
+                try:
+                    preview = d['denoised']
+                    preview = vae_decode_fake(preview)
 
-                preview = (preview * 255.0).detach().cpu().numpy().clip(0, 255).astype(np.uint8)
-                preview = einops.rearrange(preview, 'b c t h w -> (b h) (t w) c')
+                    preview = (preview * 255.0).detach().cpu().numpy().clip(0, 255).astype(np.uint8)
+                    preview = einops.rearrange(preview, 'b c t h w -> (b h) (t w) c')
 
-                if stream.input_queue.top() == 'end':
-                    stream.output_queue.push(('end', None))
-                    raise KeyboardInterrupt('User ends the task.')
+                    if stream.input_queue.top() == 'end':
+                        stream.output_queue.push(('end', None))
+                        raise KeyboardInterrupt('User ends the task.')
 
-                current_step = d['i'] + 1
-                percentage = int(100.0 * current_step / steps)
-                hint = f'Sampling {current_step}/{steps}'
-                desc = f'Total generated frames: {int(max(0, total_generated_latent_frames * 4 - 3))}, Video length: {max(0, (total_generated_latent_frames * 4 - 3) / 30) :.2f} seconds (FPS-30). The video is being extended now ...'
-                stream.output_queue.push(('progress', (preview, desc, make_progress_bar_html(percentage, hint))))
+                    current_step = d['i'] + 1
+                    percentage = int(100.0 * current_step / steps)
+                    hint = f'Sampling {current_step}/{steps}'
+                    desc = f'Total generated frames: {int(max(0, total_generated_latent_frames * 4 - 3))}, Video length: {max(0, (total_generated_latent_frames * 4 - 3) / 30) :.2f} seconds (FPS-30). The video is being extended now ...'
+                    stream.output_queue.push(('progress', (preview, desc, make_progress_bar_html(percentage, hint))))
+                except Exception as e:
+                    print(f"回调函数中出错: {e}")
+                    # 不中断采样过程
                 return
 
             try:
+                sampling_start_time = time.time()
+                print(f"开始采样，设备: {device}, 数据类型: {transformer.dtype}, 使用TeaCache: {use_teacache and not cpu_fallback_mode}")
+                
                 generated_latents = sample_hunyuan(
                     transformer=transformer,
                     sampler='unipc',
@@ -455,8 +713,8 @@ def worker(input_image, prompt, n_prompt, seed, total_second_length, latent_wind
                     negative_prompt_embeds=llama_vec_n,
                     negative_prompt_embeds_mask=llama_attention_mask_n,
                     negative_prompt_poolers=clip_l_pooler_n,
-                    device=gpu,
-                    dtype=torch.bfloat16,
+                    device=device,
+                    dtype=transformer.dtype,
                     image_embeddings=image_encoder_last_hidden_state,
                     latent_indices=latent_indices,
                     clean_latents=clean_latents,
@@ -467,6 +725,8 @@ def worker(input_image, prompt, n_prompt, seed, total_second_length, latent_wind
                     clean_latent_4x_indices=clean_latent_4x_indices,
                     callback=callback,
                 )
+                
+                print(f"采样完成，用时: {time.time() - sampling_start_time:.2f}秒")
             except Exception as e:
                 print(f"采样过程中出错: {e}")
                 traceback.print_exc()
@@ -474,23 +734,57 @@ def worker(input_image, prompt, n_prompt, seed, total_second_length, latent_wind
                 # 如果已经有生成的视频，返回最后生成的视频
                 if last_output_filename:
                     stream.output_queue.push(('file', last_output_filename))
+                    
+                    # 创建错误信息
+                    error_msg = f"采样过程中出错，但已返回部分生成的视频: {e}"
+                    stream.output_queue.push(('error', error_msg))
+                else:
+                    # 如果没有生成的视频，返回错误信息
+                    error_msg = f"采样过程中出错，无法生成视频: {e}"
+                    stream.output_queue.push(('error', error_msg))
                 
                 stream.output_queue.push(('end', None))
                 return
 
-            if is_last_section:
-                generated_latents = torch.cat([start_latent.to(generated_latents), generated_latents], dim=2)
+            try:
+                if is_last_section:
+                    generated_latents = torch.cat([start_latent.to(generated_latents), generated_latents], dim=2)
 
-            total_generated_latent_frames += int(generated_latents.shape[2])
-            history_latents = torch.cat([generated_latents.to(history_latents), history_latents], dim=2)
+                total_generated_latent_frames += int(generated_latents.shape[2])
+                history_latents = torch.cat([generated_latents.to(history_latents), history_latents], dim=2)
+            except Exception as e:
+                error_msg = f"处理生成的潜变量时出错: {e}"
+                print(error_msg)
+                traceback.print_exc()
+                
+                if last_output_filename:
+                    stream.output_queue.push(('file', last_output_filename))
+                stream.output_queue.push(('error', error_msg))
+                stream.output_queue.push(('end', None))
+                return
 
-            if not high_vram:
-                offload_model_from_device_for_memory_preservation(transformer, target_device=gpu, preserved_memory_gb=8)
-                load_model_as_complete(vae, target_device=gpu)
-
-            real_history_latents = history_latents[:, :, :total_generated_latent_frames, :, :]
+            if not high_vram and not cpu_fallback_mode:
+                try:
+                    offload_model_from_device_for_memory_preservation(transformer, target_device=device, preserved_memory_gb=8)
+                    load_model_as_complete(vae, target_device=device)
+                except Exception as e:
+                    print(f"管理模型内存时出错: {e}")
+                    # 继续执行
 
             try:
+                real_history_latents = history_latents[:, :, :total_generated_latent_frames, :, :]
+            except Exception as e:
+                error_msg = f"处理历史潜变量时出错: {e}"
+                print(error_msg)
+                
+                if last_output_filename:
+                    stream.output_queue.push(('file', last_output_filename))
+                continue
+
+            try:
+                vae_start_time = time.time()
+                print(f"开始VAE解码，潜变量形状: {real_history_latents.shape}")
+                
                 if history_pixels is None:
                     history_pixels = vae_decode(real_history_latents, vae).cpu()
                 else:
@@ -500,12 +794,19 @@ def worker(input_image, prompt, n_prompt, seed, total_second_length, latent_wind
                     current_pixels = vae_decode(real_history_latents[:, :, :section_latent_frames], vae).cpu()
                     history_pixels = soft_append_bcthw(current_pixels, history_pixels, overlapped_frames)
 
-                if not high_vram:
-                    unload_complete_models()
+                print(f"VAE解码完成，用时: {time.time() - vae_start_time:.2f}秒")
+                
+                if not high_vram and not cpu_fallback_mode:
+                    try:
+                        unload_complete_models()
+                    except Exception as e:
+                        print(f"卸载模型时出错: {e}")
 
                 output_filename = os.path.join(outputs_folder, f'{job_id}_{total_generated_latent_frames}.mp4')
 
+                save_start_time = time.time()
                 save_bcthw_as_mp4(history_pixels, output_filename, fps=30)
+                print(f"保存视频完成，用时: {time.time() - save_start_time:.2f}秒")
 
                 print(f'Decoded. Current latent shape {real_history_latents.shape}; pixel shape {history_pixels.shape}')
 
@@ -519,6 +820,10 @@ def worker(input_image, prompt, n_prompt, seed, total_second_length, latent_wind
                 if last_output_filename:
                     stream.output_queue.push(('file', last_output_filename))
                 
+                # 记录错误信息
+                error_msg = f"视频解码或保存过程中出错: {e}"
+                stream.output_queue.push(('error', error_msg))
+                
                 # 尝试继续下一次迭代
                 continue
 
@@ -528,7 +833,7 @@ def worker(input_image, prompt, n_prompt, seed, total_second_length, latent_wind
         print(f"处理过程中出现错误: {e}")
         traceback.print_exc()
 
-        if not high_vram:
+        if not high_vram and not cpu_fallback_mode:
             try:
                 unload_complete_models(
                     text_encoder, text_encoder_2, image_encoder, vae, transformer
@@ -539,6 +844,10 @@ def worker(input_image, prompt, n_prompt, seed, total_second_length, latent_wind
         # 如果已经有生成的视频，返回最后生成的视频
         if last_output_filename:
             stream.output_queue.push(('file', last_output_filename))
+        
+        # 返回错误信息
+        error_msg = f"处理过程中出现错误: {e}"
+        stream.output_queue.push(('error', error_msg))
 
     # 确保总是返回end信号
     stream.output_queue.push(('end', None))
@@ -563,6 +872,7 @@ if IN_HF_SPACE and 'spaces' in globals():
 
             output_filename = None
             prev_output_filename = None
+            error_message = None
 
             # 持续检查worker的输出
             while True:
@@ -577,13 +887,23 @@ if IN_HF_SPACE and 'spaces' in globals():
                     if flag == 'progress':
                         preview, desc, html = data
                         yield gr.update(), gr.update(visible=True, value=preview), desc, html, gr.update(interactive=False), gr.update(interactive=True)
+                    
+                    if flag == 'error':
+                        error_message = data
+                        print(f"收到错误消息: {error_message}")
+                        # 不立即显示，等待end信号
 
                     if flag == 'end':
                         # 如果有最后的视频文件，确保返回
                         if output_filename is None and prev_output_filename is not None:
                             output_filename = prev_output_filename
-                            
-                        yield output_filename, gr.update(visible=False), gr.update(), '', gr.update(interactive=True), gr.update(interactive=False)
+                        
+                        # 如果有错误消息，创建友好的错误显示
+                        if error_message:
+                            error_html = create_error_html(error_message)
+                            yield output_filename, gr.update(visible=False), gr.update(), error_html, gr.update(interactive=True), gr.update(interactive=False)
+                        else:
+                            yield output_filename, gr.update(visible=False), gr.update(), '', gr.update(interactive=True), gr.update(interactive=False)
                         break
                 except Exception as e:
                     print(f"处理输出时出错: {e}")
@@ -594,52 +914,10 @@ if IN_HF_SPACE and 'spaces' in globals():
                         
                         # 如果有部分生成的视频，返回
                         if prev_output_filename:
-                            # 创建双语部分视频生成消息
-                            partial_video_msg = f"""
-                            <div id="partial-video-container">
-                                <div class="msg-en" data-lang="en">Processing error, but partial video has been generated</div>
-                                <div class="msg-zh" data-lang="zh">处理过程中出现错误，但已生成部分视频</div>
-                            </div>
-                            <script>
-                                // 根据当前语言显示相应的消息
-                                (function() {{
-                                    const container = document.getElementById('partial-video-container');
-                                    if (container) {{
-                                        const currentLang = window.currentLang || 'en'; // 默认英语
-                                        const msgs = container.querySelectorAll('[data-lang]');
-                                        msgs.forEach(msg => {{
-                                            msg.style.display = msg.getAttribute('data-lang') === currentLang ? 'block' : 'none';
-                                        }});
-                                    }}
-                                }})();
-                            </script>
-                            """
-                            yield prev_output_filename, gr.update(visible=False), gr.update(), partial_video_msg, gr.update(interactive=True), gr.update(interactive=False)
+                            error_html = create_error_html("处理超时，但已生成部分视频", is_timeout=True)
+                            yield prev_output_filename, gr.update(visible=False), gr.update(), error_html, gr.update(interactive=True), gr.update(interactive=False)
                         else:
-                            # 创建双语错误消息
-                            error_msg = str(e)
-                            en_msg = f"Processing error: {error_msg}"
-                            zh_msg = f"处理过程中出现错误: {error_msg}"
-                            
-                            error_html = f"""
-                            <div id="error-msg-container">
-                                <div class="error-msg-en" data-lang="en">{en_msg}</div>
-                                <div class="error-msg-zh" data-lang="zh">{zh_msg}</div>
-                            </div>
-                            <script>
-                                // 根据当前语言显示相应的错误消息
-                                (function() {{
-                                    const errorContainer = document.getElementById('error-msg-container');
-                                    if (errorContainer) {{
-                                        const currentLang = window.currentLang || 'en'; // 默认英语
-                                        const errMsgs = errorContainer.querySelectorAll('[data-lang]');
-                                        errMsgs.forEach(msg => {{
-                                            msg.style.display = msg.getAttribute('data-lang') === currentLang ? 'block' : 'none';
-                                        }});
-                                    }}
-                                }})();
-                            </script>
-                            """
+                            error_html = create_error_html(f"处理超时: {e}", is_timeout=True)
                             yield None, gr.update(visible=False), gr.update(), error_html, gr.update(interactive=True), gr.update(interactive=False)
                         break
                     
@@ -647,47 +925,9 @@ if IN_HF_SPACE and 'spaces' in globals():
             print(f"启动处理时出错: {e}")
             traceback.print_exc()
             error_msg = str(e)
-            user_friendly_msg = f'处理过程出错: {error_msg}'
             
-            # 提供更友好的中英文双语错误信息
-            en_msg = ""
-            zh_msg = ""
-            
-            if "模型下载超时" in error_msg or "网络连接不稳定" in error_msg or "ReadTimeoutError" in error_msg or "ConnectionError" in error_msg:
-                en_msg = "Network connection is unstable, model download timed out. Please try again later."
-                zh_msg = "网络连接不稳定，模型下载超时。请稍后再试。"
-            elif "GPU内存不足" in error_msg or "CUDA out of memory" in error_msg or "OutOfMemoryError" in error_msg:
-                en_msg = "GPU memory insufficient, please try increasing GPU memory preservation value or reduce video length."
-                zh_msg = "GPU内存不足，请尝试增加GPU推理保留内存值或降低视频长度。"
-            elif "无法加载模型" in error_msg:
-                en_msg = "Failed to load model, possibly due to network issues or high server load. Please try again later."
-                zh_msg = "模型加载失败，可能是网络问题或服务器负载过高。请稍后再试。"
-            else:
-                en_msg = f"Processing error: {error_msg}"
-                zh_msg = f"处理过程出错: {error_msg}"
-                
-            # 创建双语错误消息HTML
-            bilingual_error = f"""
-            <div id="error-container">
-                <div class="error-msg-en" data-lang="en">{en_msg}</div>
-                <div class="error-msg-zh" data-lang="zh">{zh_msg}</div>
-            </div>
-            <script>
-                // 根据当前语言显示相应的错误消息
-                (function() {{
-                    const errorContainer = document.getElementById('error-container');
-                    if (errorContainer) {{
-                        const currentLang = window.currentLang || 'en'; // 默认英语
-                        const errMsgs = errorContainer.querySelectorAll('[data-lang]');
-                        errMsgs.forEach(msg => {{
-                            msg.style.display = msg.getAttribute('data-lang') === currentLang ? 'block' : 'none';
-                        }});
-                    }}
-                }})();
-            </script>
-            """
-                
-            yield None, gr.update(visible=False), gr.update(), bilingual_error, gr.update(interactive=True), gr.update(interactive=False)
+            error_html = create_error_html(error_msg)
+            yield None, gr.update(visible=False), gr.update(), error_html, gr.update(interactive=True), gr.update(interactive=False)
     
     process = process_with_gpu
 else:
@@ -706,6 +946,7 @@ else:
 
             output_filename = None
             prev_output_filename = None
+            error_message = None
 
             # 持续检查worker的输出
             while True:
@@ -720,13 +961,23 @@ else:
                     if flag == 'progress':
                         preview, desc, html = data
                         yield gr.update(), gr.update(visible=True, value=preview), desc, html, gr.update(interactive=False), gr.update(interactive=True)
+                    
+                    if flag == 'error':
+                        error_message = data
+                        print(f"收到错误消息: {error_message}")
+                        # 不立即显示，等待end信号
 
                     if flag == 'end':
                         # 如果有最后的视频文件，确保返回
                         if output_filename is None and prev_output_filename is not None:
                             output_filename = prev_output_filename
-                            
-                        yield output_filename, gr.update(visible=False), gr.update(), '', gr.update(interactive=True), gr.update(interactive=False)
+                        
+                        # 如果有错误消息，创建友好的错误显示
+                        if error_message:
+                            error_html = create_error_html(error_message)
+                            yield output_filename, gr.update(visible=False), gr.update(), error_html, gr.update(interactive=True), gr.update(interactive=False)
+                        else:
+                            yield output_filename, gr.update(visible=False), gr.update(), '', gr.update(interactive=True), gr.update(interactive=False)
                         break
                 except Exception as e:
                     print(f"处理输出时出错: {e}")
@@ -737,74 +988,20 @@ else:
                         
                         # 如果有部分生成的视频，返回
                         if prev_output_filename:
-                            # 创建中断消息的双语支持
-                            interrupt_msg = f"""
-                            <div id="interrupt-container">
-                                <div class="msg-en" data-lang="en">Processing was interrupted, but partial video has been generated</div>
-                                <div class="msg-zh" data-lang="zh">处理过程中断，但已生成部分视频</div>
-                            </div>
-                            <script>
-                                // 根据当前语言显示相应的消息
-                                (function() {{
-                                    const container = document.getElementById('interrupt-container');
-                                    if (container) {{
-                                        const currentLang = window.currentLang || 'en'; // 默认英语
-                                        const msgs = container.querySelectorAll('[data-lang]');
-                                        msgs.forEach(msg => {{
-                                            msg.style.display = msg.getAttribute('data-lang') === currentLang ? 'block' : 'none';
-                                        }});
-                                    }}
-                                }})();
-                            </script>
-                            """
-                            yield prev_output_filename, gr.update(visible=False), gr.update(), interrupt_msg, gr.update(interactive=True), gr.update(interactive=False)
-                            break
+                            error_html = create_error_html("处理超时，但已生成部分视频", is_timeout=True)
+                            yield prev_output_filename, gr.update(visible=False), gr.update(), error_html, gr.update(interactive=True), gr.update(interactive=False)
+                        else:
+                            error_html = create_error_html(f"处理超时: {e}", is_timeout=True)
+                            yield None, gr.update(visible=False), gr.update(), error_html, gr.update(interactive=True), gr.update(interactive=False)
+                        break
                     
         except Exception as e:
             print(f"启动处理时出错: {e}")
             traceback.print_exc()
             error_msg = str(e)
-            user_friendly_msg = f'处理过程出错: {error_msg}'
             
-            # 提供更友好的中英文双语错误信息
-            en_msg = ""
-            zh_msg = ""
-            
-            if "模型下载超时" in error_msg or "网络连接不稳定" in error_msg or "ReadTimeoutError" in error_msg or "ConnectionError" in error_msg:
-                en_msg = "Network connection is unstable, model download timed out. Please try again later."
-                zh_msg = "网络连接不稳定，模型下载超时。请稍后再试。"
-            elif "GPU内存不足" in error_msg or "CUDA out of memory" in error_msg or "OutOfMemoryError" in error_msg:
-                en_msg = "GPU memory insufficient, please try increasing GPU memory preservation value or reduce video length."
-                zh_msg = "GPU内存不足，请尝试增加GPU推理保留内存值或降低视频长度。"
-            elif "无法加载模型" in error_msg:
-                en_msg = "Failed to load model, possibly due to network issues or high server load. Please try again later."
-                zh_msg = "模型加载失败，可能是网络问题或服务器负载过高。请稍后再试。"
-            else:
-                en_msg = f"Processing error: {error_msg}"
-                zh_msg = f"处理过程出错: {error_msg}"
-                
-            # 创建双语错误消息HTML
-            bilingual_error = f"""
-            <div id="error-container">
-                <div class="error-msg-en" data-lang="en">{en_msg}</div>
-                <div class="error-msg-zh" data-lang="zh">{zh_msg}</div>
-            </div>
-            <script>
-                // 根据当前语言显示相应的错误消息
-                (function() {{
-                    const errorContainer = document.getElementById('error-container');
-                    if (errorContainer) {{
-                        const currentLang = window.currentLang || 'en'; // 默认英语
-                        const errMsgs = errorContainer.querySelectorAll('[data-lang]');
-                        errMsgs.forEach(msg => {{
-                            msg.style.display = msg.getAttribute('data-lang') === currentLang ? 'block' : 'none';
-                        }});
-                    }}
-                }})();
-            </script>
-            """
-                
-            yield None, gr.update(visible=False), gr.update(), bilingual_error, gr.update(interactive=True), gr.update(interactive=False)
+            error_html = create_error_html(error_msg)
+            yield None, gr.update(visible=False), gr.update(), error_html, gr.update(interactive=True), gr.update(interactive=False)
 
 
 def end_process():
@@ -1269,3 +1466,57 @@ with block:
 
 
 block.launch() 
+
+# 创建友好的错误显示HTML
+def create_error_html(error_msg, is_timeout=False):
+    """创建双语错误消息HTML"""
+    # 提供更友好的中英文双语错误信息
+    en_msg = ""
+    zh_msg = ""
+    
+    if is_timeout:
+        en_msg = "Processing timed out, but partial video may have been generated" if "部分视频" in error_msg else f"Processing timed out: {error_msg}"
+        zh_msg = "处理超时，但已生成部分视频" if "部分视频" in error_msg else f"处理超时: {error_msg}"
+    elif "模型加载失败" in error_msg:
+        en_msg = "Failed to load models. The Space may be experiencing high traffic or GPU issues."
+        zh_msg = "模型加载失败，可能是Space流量过高或GPU资源不足。"
+    elif "GPU" in error_msg or "CUDA" in error_msg or "内存" in error_msg or "memory" in error_msg:
+        en_msg = "GPU memory insufficient or GPU error. Try increasing GPU memory preservation value or reduce video length."
+        zh_msg = "GPU内存不足或GPU错误，请尝试增加GPU推理保留内存值或降低视频长度。"
+    elif "采样过程中出错" in error_msg:
+        if "部分" in error_msg:
+            en_msg = "Error during sampling process, but partial video has been generated."
+            zh_msg = "采样过程中出错，但已生成部分视频。"
+        else:
+            en_msg = "Error during sampling process. Unable to generate video."
+            zh_msg = "采样过程中出错，无法生成视频。"
+    elif "模型下载超时" in error_msg or "网络连接不稳定" in error_msg or "ReadTimeoutError" in error_msg or "ConnectionError" in error_msg:
+        en_msg = "Network connection is unstable, model download timed out. Please try again later."
+        zh_msg = "网络连接不稳定，模型下载超时。请稍后再试。"
+    elif "VAE" in error_msg or "解码" in error_msg or "decode" in error_msg:
+        en_msg = "Error during video decoding or saving process. Try again with a different seed."
+        zh_msg = "视频解码或保存过程中出错，请尝试使用不同的随机种子。"
+    else:
+        en_msg = f"Processing error: {error_msg}"
+        zh_msg = f"处理过程出错: {error_msg}"
+    
+    # 创建双语错误消息HTML
+    return f"""
+    <div id="error-container" class="error-message">
+        <div class="error-msg-en" data-lang="en">{en_msg}</div>
+        <div class="error-msg-zh" data-lang="zh">{zh_msg}</div>
+    </div>
+    <script>
+        // 根据当前语言显示相应的错误消息
+        (function() {{
+            const errorContainer = document.getElementById('error-container');
+            if (errorContainer) {{
+                const currentLang = window.currentLang || 'en'; // 默认英语
+                const errMsgs = errorContainer.querySelectorAll('[data-lang]');
+                errMsgs.forEach(msg => {{
+                    msg.style.display = msg.getAttribute('data-lang') === currentLang ? 'block' : 'none';
+                }});
+            }}
+        }})();
+    </script>
+    """ 
