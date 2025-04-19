@@ -818,6 +818,137 @@ quick_prompts = [
 quick_prompts = [[x] for x in quick_prompts]
 
 
+# 创建一个自定义CSS，增加响应式布局支持
+def make_custom_css():
+    progress_bar_css = make_progress_bar_css()
+    
+    responsive_css = """
+    /* 基础响应式设置 */
+    #app-container {
+        max-width: 100%;
+        margin: 0 auto;
+    }
+    
+    /* 语言切换按钮样式 */
+    #language-toggle {
+        position: fixed;
+        top: 10px;
+        right: 10px;
+        z-index: 1000;
+        background-color: rgba(0, 0, 0, 0.7);
+        color: white;
+        border: none;
+        border-radius: 4px;
+        padding: 5px 10px;
+        cursor: pointer;
+        font-size: 14px;
+    }
+    
+    /* 页面标题样式 */
+    h1 {
+        font-size: 2rem;
+        text-align: center;
+        margin-bottom: 1rem;
+    }
+    
+    /* 按钮样式 */
+    .start-btn, .stop-btn {
+        min-height: 45px;
+        font-size: 1rem;
+    }
+    
+    /* 移动设备样式 - 小屏幕 */
+    @media (max-width: 768px) {
+        h1 {
+            font-size: 1.5rem;
+            margin-bottom: 0.5rem;
+        }
+        
+        /* 单列布局 */
+        .mobile-full-width {
+            flex-direction: column !important;
+        }
+        
+        .mobile-full-width > .gr-block {
+            min-width: 100% !important;
+            flex-grow: 1;
+        }
+        
+        /* 调整视频大小 */
+        .video-container {
+            height: auto !important;
+        }
+        
+        /* 调整按钮大小 */
+        .button-container button {
+            min-height: 50px;
+            font-size: 1rem;
+            touch-action: manipulation;
+        }
+        
+        /* 调整滑块 */
+        .slider-container input[type="range"] {
+            height: 30px;
+        }
+    }
+    
+    /* 平板设备样式 */
+    @media (min-width: 769px) and (max-width: 1024px) {
+        .tablet-adjust {
+            width: 48% !important;
+        }
+    }
+    
+    /* 黑暗模式支持 */
+    @media (prefers-color-scheme: dark) {
+        .dark-mode-text {
+            color: #f0f0f0;
+        }
+        
+        .dark-mode-bg {
+            background-color: #2a2a2a;
+        }
+    }
+    
+    /* 增强可访问性 */
+    button, input, select, textarea {
+        font-size: 16px; /* 防止iOS缩放 */
+    }
+    
+    /* 触摸优化 */
+    button, .interactive-element {
+        min-height: 44px;
+        min-width: 44px;
+    }
+    
+    /* 提高对比度 */
+    .high-contrast {
+        color: #fff;
+        background-color: #000;
+    }
+    
+    /* 进度条样式增强 */
+    .progress-container {
+        margin-top: 10px;
+        margin-bottom: 10px;
+    }
+    
+    /* 错误消息样式 */
+    #error-message {
+        color: #ff4444;
+        font-weight: bold;
+        padding: 10px;
+        border-radius: 4px;
+        margin-top: 10px;
+        background-color: rgba(255, 0, 0, 0.1);
+    }
+    """
+    
+    # 合并CSS
+    combined_css = progress_bar_css + responsive_css
+    return combined_css
+
+
 css = make_custom_css()
 block = gr.Blocks(css=css).queue()
 with block:
@@ -1135,137 +1266,6 @@ with block:
     # 开始和结束按钮事件
     start_button.click(fn=process, inputs=ips, outputs=[result_video, preview_image, progress_desc, progress_bar, start_button, end_button])
     end_button.click(fn=end_process)
-
-
-# 创建一个自定义CSS，增加响应式布局支持
-def make_custom_css():
-    progress_bar_css = make_progress_bar_css()
-    
-    responsive_css = """
-    /* 基础响应式设置 */
-    #app-container {
-        max-width: 100%;
-        margin: 0 auto;
-    }
-    
-    /* 语言切换按钮样式 */
-    #language-toggle {
-        position: fixed;
-        top: 10px;
-        right: 10px;
-        z-index: 1000;
-        background-color: rgba(0, 0, 0, 0.7);
-        color: white;
-        border: none;
-        border-radius: 4px;
-        padding: 5px 10px;
-        cursor: pointer;
-        font-size: 14px;
-    }
-    
-    /* 页面标题样式 */
-    h1 {
-        font-size: 2rem;
-        text-align: center;
-        margin-bottom: 1rem;
-    }
-    
-    /* 按钮样式 */
-    .start-btn, .stop-btn {
-        min-height: 45px;
-        font-size: 1rem;
-    }
-    
-    /* 移动设备样式 - 小屏幕 */
-    @media (max-width: 768px) {
-        h1 {
-            font-size: 1.5rem;
-            margin-bottom: 0.5rem;
-        }
-        
-        /* 单列布局 */
-        .mobile-full-width {
-            flex-direction: column !important;
-        }
-        
-        .mobile-full-width > .gr-block {
-            min-width: 100% !important;
-            flex-grow: 1;
-        }
-        
-        /* 调整视频大小 */
-        .video-container {
-            height: auto !important;
-        }
-        
-        /* 调整按钮大小 */
-        .button-container button {
-            min-height: 50px;
-            font-size: 1rem;
-            touch-action: manipulation;
-        }
-        
-        /* 调整滑块 */
-        .slider-container input[type="range"] {
-            height: 30px;
-        }
-    }
-    
-    /* 平板设备样式 */
-    @media (min-width: 769px) and (max-width: 1024px) {
-        .tablet-adjust {
-            width: 48% !important;
-        }
-    }
-    
-    /* 黑暗模式支持 */
-    @media (prefers-color-scheme: dark) {
-        .dark-mode-text {
-            color: #f0f0f0;
-        }
-        
-        .dark-mode-bg {
-            background-color: #2a2a2a;
-        }
-    }
-    
-    /* 增强可访问性 */
-    button, input, select, textarea {
-        font-size: 16px; /* 防止iOS缩放 */
-    }
-    
-    /* 触摸优化 */
-    button, .interactive-element {
-        min-height: 44px;
-        min-width: 44px;
-    }
-    
-    /* 提高对比度 */
-    .high-contrast {
-        color: #fff;
-        background-color: #000;
-    }
-    
-    /* 进度条样式增强 */
-    .progress-container {
-        margin-top: 10px;
-        margin-bottom: 10px;
-    }
-    
-    /* 错误消息样式 */
-    #error-message {
-        color: #ff4444;
-        font-weight: bold;
-        padding: 10px;
-        border-radius: 4px;
-        margin-top: 10px;
-        background-color: rgba(255, 0, 0, 0.1);
-    }
-    """
-    
-    # 合并CSS
-    combined_css = progress_bar_css + responsive_css
-    return combined_css
 
 
 block.launch() 
