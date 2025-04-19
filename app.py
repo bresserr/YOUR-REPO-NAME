@@ -1133,56 +1133,65 @@ def make_custom_css():
     /* 进度条样式增强 */
     .progress-container {
         margin-top: 10px;
-        margin-bottom: 10px;
     }
     
     /* 错误消息样式 */
-    #error-message {
-        color: #ff4444;
-        font-weight: bold;
-        padding: 10px;
-        border-radius: 4px;
-        margin-top: 10px;
-    }
-    
-    /* 确保错误容器正确显示 */
     .error-message {
-        background-color: rgba(255, 0, 0, 0.1);
-        padding: 10px;
-        border-radius: 4px;
-        margin-top: 10px;
-        border: 1px solid #ffcccc;
+        background-color: rgba(255, 220, 220, 0.95);
+        border: 1px solid #ff0000;
+        border-radius: 5px;
+        padding: 12px 15px;
+        margin: 15px 0;
+        font-size: 15px;
+        display: flex;
+        flex-direction: column;
+        gap: 4px;
     }
     
-    /* 处理多语言错误消息 */
-    .error-msg-en, .error-msg-zh {
-        font-weight: bold;
-    }
-    
-    /* 错误图标 */
-    .error-icon {
-        color: #ff4444;
-        font-size: 18px;
-        margin-right: 8px;
-    }
-    
-    /* 确保空错误消息不显示背景和边框 */
-    #error-message:empty {
-        background-color: transparent;
+    .error-message:empty {
+        display: none;
+        background: none;
         border: none;
         padding: 0;
         margin: 0;
     }
     
-    /* 修复Gradio默认错误显示 */
-    .error {
+    .error-icon {
+        margin-right: 8px;
+        font-size: 16px;
+    }
+    
+    .error-msg-en, .error-msg-zh {
+        padding: 4px 0;
+        line-height: 1.4;
+    }
+    
+    /* 确保Gradio默认错误消息不与我们的冲突 */
+    #custom-error-container + .error {
         display: none !important;
+    }
+    
+    /* 空错误消息不显示 */
+    #error-message:empty, 
+    #custom-error-container:empty {
+        display: none !important;
+        background: none !important;
+        border: none !important;
+        padding: 0 !important;
+        margin: 0 !important;
+    }
+    
+    /* 黑暗模式下的错误消息 */
+    @media (prefers-color-scheme: dark) {
+        .error-message {
+            background-color: rgba(80, 0, 0, 0.95);
+            border-color: #ff5555;
+            color: #ffdddd;
+        }
     }
     """
     
-    # 合并CSS
-    combined_css = progress_bar_css + responsive_css
-    return combined_css
+    return progress_bar_css + responsive_css
 
 
 css = make_custom_css()
