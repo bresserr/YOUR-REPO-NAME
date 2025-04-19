@@ -1028,22 +1028,6 @@ if IN_HF_SPACE and 'spaces' in globals():
         # 调用普通的process函数实现，以避免重复代码
         return process(input_image, prompt, n_prompt, seed, total_second_length, latent_window_size, steps, cfg, gs, rs, gpu_memory_preservation, use_teacache)
 
-    # 仅在环境中设置，不在这里覆盖process函数
-    process_gpu = process_with_gpu
-
-
-# 处理函数
-ips = [input_image, prompt, n_prompt, seed, total_second_length, latent_window_size, steps, cfg, gs, rs, gpu_memory_preservation, use_teacache]
-
-# 开始和结束按钮事件
-if IN_HF_SPACE and 'spaces' in globals() and GPU_AVAILABLE and not cpu_fallback_mode:
-    # 使用带GPU装饰器的处理函数
-    start_button.click(fn=process_gpu, inputs=ips, outputs=[result_video, preview_image, progress_desc, progress_bar, start_button, end_button])
-else:
-    # 使用普通处理函数
-    start_button.click(fn=process, inputs=ips, outputs=[result_video, preview_image, progress_desc, progress_bar, start_button, end_button])
-
-end_button.click(fn=end_process)
 
 quick_prompts = [
     'The girl dances gracefully, with clear movements, full of charm.',
@@ -1535,5 +1519,18 @@ with block:
             
             # 错误信息区域 - 确保使用HTML组件以支持我们的自定义错误消息格式
             error_message = gr.HTML('', elem_id='error-message', visible=True)
+
+    # 在此处定义处理函数需要的输入参数列表，确保UI元素已定义
+    ips = [input_image, prompt, n_prompt, seed, total_second_length, latent_window_size, steps, cfg, gs, rs, gpu_memory_preservation, use_teacache]
+    
+    # 开始和结束按钮事件
+    if IN_HF_SPACE and 'spaces' in globals() and GPU_AVAILABLE and not cpu_fallback_mode:
+        # 使用带GPU装饰器的处理函数
+        start_button.click(fn=process_with_gpu, inputs=ips, outputs=[result_video, preview_image, progress_desc, progress_bar, start_button, end_button])
+    else:
+        # 使用普通处理函数
+        start_button.click(fn=process, inputs=ips, outputs=[result_video, preview_image, progress_desc, progress_bar, start_button, end_button])
+    
+    end_button.click(fn=end_process)
 
 block.launch() 
