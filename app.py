@@ -854,179 +854,164 @@ def worker(input_image, prompt, n_prompt, seed, total_second_length, latent_wind
     return
 
 
-# 创建友好的错误显示HTML
-def create_error_html(error_msg, is_timeout=False):
-    """创建双语错误消息HTML"""
-    # 提供更友好的中英文双语错误信息
-    en_msg = ""
-    zh_msg = ""
-    
-    if is_timeout:
-        en_msg = "Processing timed out, but partial video may have been generated" if "部分视频" in error_msg else f"Processing timed out: {error_msg}"
-        zh_msg = "处理超时，但已生成部分视频" if "部分视频" in error_msg else f"处理超时: {error_msg}"
-    elif "模型加载失败" in error_msg:
-        en_msg = "Failed to load models. The Space may be experiencing high traffic or GPU issues."
-        zh_msg = "模型加载失败，可能是Space流量过高或GPU资源不足。"
-    elif "GPU" in error_msg or "CUDA" in error_msg or "内存" in error_msg or "memory" in error_msg:
-        en_msg = "GPU memory insufficient or GPU error. Try increasing GPU memory preservation value or reduce video length."
-        zh_msg = "GPU内存不足或GPU错误，请尝试增加GPU推理保留内存值或降低视频长度。"
-    elif "采样过程中出错" in error_msg:
-        if "部分" in error_msg:
-            en_msg = "Error during sampling process, but partial video has been generated."
-            zh_msg = "采样过程中出错，但已生成部分视频。"
-        else:
-            en_msg = "Error during sampling process. Unable to generate video."
-            zh_msg = "采样过程中出错，无法生成视频。"
-    elif "模型下载超时" in error_msg or "网络连接不稳定" in error_msg or "ReadTimeoutError" in error_msg or "ConnectionError" in error_msg:
-        en_msg = "Network connection is unstable, model download timed out. Please try again later."
-        zh_msg = "网络连接不稳定，模型下载超时。请稍后再试。"
-    elif "VAE" in error_msg or "解码" in error_msg or "decode" in error_msg:
-        en_msg = "Error during video decoding or saving process. Try again with a different seed."
-        zh_msg = "视频解码或保存过程中出错，请尝试使用不同的随机种子。"
-    else:
-        en_msg = f"Processing error: {error_msg}"
-        zh_msg = f"处理过程出错: {error_msg}"
-    
-    # 创建双语错误消息HTML - 添加有用的图标并确保CSS样式适用
-    return f"""
-    <div class="error-message" id="custom-error-container">
-        <div class="error-msg-en" data-lang="en">
-            <span class="error-icon">⚠️</span> {en_msg}
-        </div>
-        <div class="error-msg-zh" data-lang="zh">
-            <span class="error-icon">⚠️</span> {zh_msg}
-        </div>
-    </div>
-    <script>
-        // 根据当前语言显示相应的错误消息
-        (function() {{
-            const errorContainer = document.getElementById('custom-error-container');
-            if (errorContainer) {{
-                const currentLang = window.currentLang || 'en'; // 默认英语
-                const errMsgs = errorContainer.querySelectorAll('[data-lang]');
-                errMsgs.forEach(msg => {{
-                    msg.style.display = msg.getAttribute('data-lang') === currentLang ? 'block' : 'none';
-                }});
-                
-                // 确保Gradio默认错误UI不显示
-                const defaultErrorElements = document.querySelectorAll('.error');
-                defaultErrorElements.forEach(el => {{
-                    el.style.display = 'none';
-                }});
-            }}
-        }})();
-    </script>
-    """
-
-# 修改process函数，添加任务状态检查
-def process(input_image, prompt, n_prompt, seed, total_second_length, latent_window_size, steps, cfg, gs, rs, gpu_memory_preservation, use_teacache):
-    global stream
-    assert input_image is not None, 'No input image!'
-
-    # 检查是否有正在运行的任务并清理
-    if hasattr(stream, 'is_running') and stream.is_running:
-        try:
-            # 终止现有任务
-            stream.input_queue.push('end')
-            time.sleep(0.5)  # 给一点时间让旧任务结束
-        except:
-            pass
-    
-    # 创建新的流实例
-    stream = AsyncStream()
-    stream.is_running = True
-
-    # 初始化UI状态
-    yield None, None, '', '', gr.update(interactive=False), gr.update(interactive=True)
-
-    try:
-        # 异步启动worker
-        async_run(worker, input_image, prompt, n_prompt, seed, total_second_length, latent_window_size, steps, cfg, gs, rs, gpu_memory_preservation, use_teacache)
-
-        output_filename = None
-        prev_output_filename = None
-        error_message = None
-
-        # 持续检查worker的输出
-        while True:
-            try:
-                flag, data = stream.output_queue.next()
-
-                if flag == 'file':
-                    output_filename = data
-                    prev_output_filename = output_filename
-                    # 清除错误显示，确保文件成功时不显示错误
-                    yield output_filename, gr.update(), gr.update(), '', gr.update(interactive=False), gr.update(interactive=True)
-
-                if flag == 'progress':
-                    preview, desc, html = data
-                    # 更新进度时不改变错误信息
-                    yield gr.update(), gr.update(visible=True, value=preview), desc, html, gr.update(interactive=False), gr.update(interactive=True)
-                
-                if flag == 'error':
-                    error_message = data
-                    print(f"收到错误消息: {error_message}")
-                    # 不立即显示，等待end信号
-
-                if flag == 'end':
-                    # 如果有最后的视频文件，确保返回
-                    if output_filename is None and prev_output_filename is not None:
-                        output_filename = prev_output_filename
-                    
-                    # 如果有错误消息，创建友好的错误显示
-                    if error_message:
-                        error_html = create_error_html(error_message)
-                        yield output_filename, gr.update(visible=False), gr.update(), error_html, gr.update(interactive=True), gr.update(interactive=False)
-                    else:
-                        # 确保成功完成时不显示任何错误
-                        yield output_filename, gr.update(visible=False), gr.update(), '', gr.update(interactive=True), gr.update(interactive=False)
-                    
-                    # 标记任务已结束
-                    stream.is_running = False
-                    break
-            except Exception as e:
-                print(f"处理输出时出错: {e}")
-                # 检查是否长时间没有更新
-                current_time = time.time()
-                if current_time - last_update_time > 60:  # 60秒没有更新，可能卡住了
-                    print(f"处理似乎卡住了，已经 {current_time - last_update_time:.1f} 秒没有更新")
-                    
-                    # 如果有部分生成的视频，返回
-                    if prev_output_filename:
-                        error_html = create_error_html("处理超时，但已生成部分视频", is_timeout=True)
-                        yield prev_output_filename, gr.update(visible=False), gr.update(), error_html, gr.update(interactive=True), gr.update(interactive=False)
-                    else:
-                        error_html = create_error_html(f"处理超时: {e}", is_timeout=True)
-                        yield None, gr.update(visible=False), gr.update(), error_html, gr.update(interactive=True), gr.update(interactive=False)
-                    
-                    # 标记任务已结束
-                    stream.is_running = False
-                    break
-                
-    except Exception as e:
-        print(f"启动处理时出错: {e}")
-        traceback.print_exc()
-        error_msg = str(e)
-        
-        error_html = create_error_html(error_msg)
-        yield None, gr.update(visible=False), gr.update(), error_html, gr.update(interactive=True), gr.update(interactive=False)
-        
-        # 标记任务已结束
-        stream.is_running = False
-
-def end_process():
-    if hasattr(stream, 'input_queue'):
-        stream.input_queue.push('end')
-    if hasattr(stream, 'is_running'):
-        stream.is_running = False
-
-
 # 使用Hugging Face Spaces GPU装饰器处理进程函数
 if IN_HF_SPACE and 'spaces' in globals():
     @spaces.GPU
     def process_with_gpu(input_image, prompt, n_prompt, seed, total_second_length, latent_window_size, steps, cfg, gs, rs, gpu_memory_preservation, use_teacache):
-        # 调用普通的process函数实现，以避免重复代码
-        return process(input_image, prompt, n_prompt, seed, total_second_length, latent_window_size, steps, cfg, gs, rs, gpu_memory_preservation, use_teacache)
+        global stream
+        assert input_image is not None, 'No input image!'
+
+        # 初始化UI状态
+        yield None, None, '', '', gr.update(interactive=False), gr.update(interactive=True)
+
+        try:
+            stream = AsyncStream()
+
+            # 异步启动worker
+            async_run(worker, input_image, prompt, n_prompt, seed, total_second_length, latent_window_size, steps, cfg, gs, rs, gpu_memory_preservation, use_teacache)
+
+            output_filename = None
+            prev_output_filename = None
+            error_message = None
+
+            # 持续检查worker的输出
+            while True:
+                try:
+                    flag, data = stream.output_queue.next()
+
+                    if flag == 'file':
+                        output_filename = data
+                        prev_output_filename = output_filename
+                        # 清除错误显示，确保文件成功时不显示错误
+                        yield output_filename, gr.update(), gr.update(), '', gr.update(interactive=False), gr.update(interactive=True)
+
+                    if flag == 'progress':
+                        preview, desc, html = data
+                        # 更新进度时不改变错误信息
+                        yield gr.update(), gr.update(visible=True, value=preview), desc, html, gr.update(interactive=False), gr.update(interactive=True)
+                    
+                    if flag == 'error':
+                        error_message = data
+                        print(f"收到错误消息: {error_message}")
+                        # 不立即显示，等待end信号
+
+                    if flag == 'end':
+                        # 如果有最后的视频文件，确保返回
+                        if output_filename is None and prev_output_filename is not None:
+                            output_filename = prev_output_filename
+                        
+                        # 如果有错误消息，创建友好的错误显示
+                        if error_message:
+                            error_html = create_error_html(error_message)
+                            yield output_filename, gr.update(visible=False), gr.update(), error_html, gr.update(interactive=True), gr.update(interactive=False)
+                        else:
+                            # 确保成功完成时不显示任何错误
+                            yield output_filename, gr.update(visible=False), gr.update(), '', gr.update(interactive=True), gr.update(interactive=False)
+                        break
+                except Exception as e:
+                    print(f"处理输出时出错: {e}")
+                    # 检查是否长时间没有更新
+                    current_time = time.time()
+                    if current_time - last_update_time > 60:  # 60秒没有更新，可能卡住了
+                        print(f"处理似乎卡住了，已经 {current_time - last_update_time:.1f} 秒没有更新")
+                        
+                        # 如果有部分生成的视频，返回
+                        if prev_output_filename:
+                            error_html = create_error_html("处理超时，但已生成部分视频", is_timeout=True)
+                            yield prev_output_filename, gr.update(visible=False), gr.update(), error_html, gr.update(interactive=True), gr.update(interactive=False)
+                        else:
+                            error_html = create_error_html(f"处理超时: {e}", is_timeout=True)
+                            yield None, gr.update(visible=False), gr.update(), error_html, gr.update(interactive=True), gr.update(interactive=False)
+                        break
+                    
+        except Exception as e:
+            print(f"启动处理时出错: {e}")
+            traceback.print_exc()
+            error_msg = str(e)
+            
+            error_html = create_error_html(error_msg)
+            yield None, gr.update(visible=False), gr.update(), error_html, gr.update(interactive=True), gr.update(interactive=False)
+    
+    process = process_with_gpu
+else:
+    def process(input_image, prompt, n_prompt, seed, total_second_length, latent_window_size, steps, cfg, gs, rs, gpu_memory_preservation, use_teacache):
+        global stream
+        assert input_image is not None, 'No input image!'
+
+        # 初始化UI状态
+        yield None, None, '', '', gr.update(interactive=False), gr.update(interactive=True)
+
+        try:
+            stream = AsyncStream()
+
+            # 异步启动worker
+            async_run(worker, input_image, prompt, n_prompt, seed, total_second_length, latent_window_size, steps, cfg, gs, rs, gpu_memory_preservation, use_teacache)
+
+            output_filename = None
+            prev_output_filename = None
+            error_message = None
+
+            # 持续检查worker的输出
+            while True:
+                try:
+                    flag, data = stream.output_queue.next()
+
+                    if flag == 'file':
+                        output_filename = data
+                        prev_output_filename = output_filename
+                        # 清除错误显示，确保文件成功时不显示错误
+                        yield output_filename, gr.update(), gr.update(), '', gr.update(interactive=False), gr.update(interactive=True)
+
+                    if flag == 'progress':
+                        preview, desc, html = data
+                        # 更新进度时不改变错误信息
+                        yield gr.update(), gr.update(visible=True, value=preview), desc, html, gr.update(interactive=False), gr.update(interactive=True)
+                    
+                    if flag == 'error':
+                        error_message = data
+                        print(f"收到错误消息: {error_message}")
+                        # 不立即显示，等待end信号
+
+                    if flag == 'end':
+                        # 如果有最后的视频文件，确保返回
+                        if output_filename is None and prev_output_filename is not None:
+                            output_filename = prev_output_filename
+                        
+                        # 如果有错误消息，创建友好的错误显示
+                        if error_message:
+                            error_html = create_error_html(error_message)
+                            yield output_filename, gr.update(visible=False), gr.update(), error_html, gr.update(interactive=True), gr.update(interactive=False)
+                        else:
+                            # 确保成功完成时不显示任何错误
+                            yield output_filename, gr.update(visible=False), gr.update(), '', gr.update(interactive=True), gr.update(interactive=False)
+                        break
+                except Exception as e:
+                    print(f"处理输出时出错: {e}")
+                    # 检查是否长时间没有更新
+                    current_time = time.time()
+                    if current_time - last_update_time > 60:  # 60秒没有更新，可能卡住了
+                        print(f"处理似乎卡住了，已经 {current_time - last_update_time:.1f} 秒没有更新")
+                        
+                        # 如果有部分生成的视频，返回
+                        if prev_output_filename:
+                            error_html = create_error_html("处理超时，但已生成部分视频", is_timeout=True)
+                            yield prev_output_filename, gr.update(visible=False), gr.update(), error_html, gr.update(interactive=True), gr.update(interactive=False)
+                        else:
+                            error_html = create_error_html(f"处理超时: {e}", is_timeout=True)
+                            yield None, gr.update(visible=False), gr.update(), error_html, gr.update(interactive=True), gr.update(interactive=False)
+                        break
+                    
+        except Exception as e:
+            print(f"启动处理时出错: {e}")
+            traceback.print_exc()
+            error_msg = str(e)
+            
+            error_html = create_error_html(error_msg)
+            yield None, gr.update(visible=False), gr.update(), error_html, gr.update(interactive=True), gr.update(interactive=False)
+
+
+def end_process():
+    stream.input_queue.push('end')
 
 
 quick_prompts = [
@@ -1148,65 +1133,56 @@ def make_custom_css():
     /* 进度条样式增强 */
     .progress-container {
         margin-top: 10px;
+        margin-bottom: 10px;
     }
     
     /* 错误消息样式 */
-    .error-message {
-        background-color: rgba(255, 220, 220, 0.95);
-        border: 1px solid #ff0000;
-        border-radius: 5px;
-        padding: 12px 15px;
-        margin: 15px 0;
-        font-size: 15px;
-        display: flex;
-        flex-direction: column;
-        gap: 4px;
+    #error-message {
+        color: #ff4444;
+        font-weight: bold;
+        padding: 10px;
+        border-radius: 4px;
+        margin-top: 10px;
     }
     
-    .error-message:empty {
-        display: none;
-        background: none;
+    /* 确保错误容器正确显示 */
+    .error-message {
+        background-color: rgba(255, 0, 0, 0.1);
+        padding: 10px;
+        border-radius: 4px;
+        margin-top: 10px;
+        border: 1px solid #ffcccc;
+    }
+    
+    /* 处理多语言错误消息 */
+    .error-msg-en, .error-msg-zh {
+        font-weight: bold;
+    }
+    
+    /* 错误图标 */
+    .error-icon {
+        color: #ff4444;
+        font-size: 18px;
+        margin-right: 8px;
+    }
+    
+    /* 确保空错误消息不显示背景和边框 */
+    #error-message:empty {
+        background-color: transparent;
         border: none;
         padding: 0;
         margin: 0;
     }
     
-    .error-icon {
-        margin-right: 8px;
-        font-size: 16px;
-    }
-    
-    .error-msg-en, .error-msg-zh {
-        padding: 4px 0;
-        line-height: 1.4;
-    }
-    
-    /* 确保Gradio默认错误消息不与我们的冲突 */
-    #custom-error-container + .error {
+    /* 修复Gradio默认错误显示 */
+    .error {
         display: none !important;
-    }
-    
-    /* 空错误消息不显示 */
-    #error-message:empty, 
-    #custom-error-container:empty {
-        display: none !important;
-        background: none !important;
-        border: none !important;
-        padding: 0 !important;
-        margin: 0 !important;
-    }
-    
-    /* 黑暗模式下的错误消息 */
-    @media (prefers-color-scheme: dark) {
-        .error-message {
-            background-color: rgba(80, 0, 0, 0.95);
-            border-color: #ff5555;
-            color: #ffdddd;
-        }
     }
     """
     
-    return progress_bar_css + responsive_css
+    # 合并CSS
+    combined_css = progress_bar_css + responsive_css
+    return combined_css
 
 
 css = make_custom_css()
@@ -1519,18 +1495,77 @@ with block:
             
             # 错误信息区域 - 确保使用HTML组件以支持我们的自定义错误消息格式
             error_message = gr.HTML('', elem_id='error-message', visible=True)
-
-    # 在此处定义处理函数需要的输入参数列表，确保UI元素已定义
+    
+    # 处理函数
     ips = [input_image, prompt, n_prompt, seed, total_second_length, latent_window_size, steps, cfg, gs, rs, gpu_memory_preservation, use_teacache]
     
     # 开始和结束按钮事件
-    if IN_HF_SPACE and 'spaces' in globals() and GPU_AVAILABLE and not cpu_fallback_mode:
-        # 使用带GPU装饰器的处理函数
-        start_button.click(fn=process_with_gpu, inputs=ips, outputs=[result_video, preview_image, progress_desc, progress_bar, start_button, end_button])
-    else:
-        # 使用普通处理函数
-        start_button.click(fn=process, inputs=ips, outputs=[result_video, preview_image, progress_desc, progress_bar, start_button, end_button])
-    
+    start_button.click(fn=process, inputs=ips, outputs=[result_video, preview_image, progress_desc, progress_bar, start_button, end_button])
     end_button.click(fn=end_process)
 
+
 block.launch() 
+
+# 创建友好的错误显示HTML
+def create_error_html(error_msg, is_timeout=False):
+    """创建双语错误消息HTML"""
+    # 提供更友好的中英文双语错误信息
+    en_msg = ""
+    zh_msg = ""
+    
+    if is_timeout:
+        en_msg = "Processing timed out, but partial video may have been generated" if "部分视频" in error_msg else f"Processing timed out: {error_msg}"
+        zh_msg = "处理超时，但已生成部分视频" if "部分视频" in error_msg else f"处理超时: {error_msg}"
+    elif "模型加载失败" in error_msg:
+        en_msg = "Failed to load models. The Space may be experiencing high traffic or GPU issues."
+        zh_msg = "模型加载失败，可能是Space流量过高或GPU资源不足。"
+    elif "GPU" in error_msg or "CUDA" in error_msg or "内存" in error_msg or "memory" in error_msg:
+        en_msg = "GPU memory insufficient or GPU error. Try increasing GPU memory preservation value or reduce video length."
+        zh_msg = "GPU内存不足或GPU错误，请尝试增加GPU推理保留内存值或降低视频长度。"
+    elif "采样过程中出错" in error_msg:
+        if "部分" in error_msg:
+            en_msg = "Error during sampling process, but partial video has been generated."
+            zh_msg = "采样过程中出错，但已生成部分视频。"
+        else:
+            en_msg = "Error during sampling process. Unable to generate video."
+            zh_msg = "采样过程中出错，无法生成视频。"
+    elif "模型下载超时" in error_msg or "网络连接不稳定" in error_msg or "ReadTimeoutError" in error_msg or "ConnectionError" in error_msg:
+        en_msg = "Network connection is unstable, model download timed out. Please try again later."
+        zh_msg = "网络连接不稳定，模型下载超时。请稍后再试。"
+    elif "VAE" in error_msg or "解码" in error_msg or "decode" in error_msg:
+        en_msg = "Error during video decoding or saving process. Try again with a different seed."
+        zh_msg = "视频解码或保存过程中出错，请尝试使用不同的随机种子。"
+    else:
+        en_msg = f"Processing error: {error_msg}"
+        zh_msg = f"处理过程出错: {error_msg}"
+    
+    # 创建双语错误消息HTML - 添加有用的图标并确保CSS样式适用
+    return f"""
+    <div class="error-message" id="custom-error-container">
+        <div class="error-msg-en" data-lang="en">
+            <span class="error-icon">⚠️</span> {en_msg}
+        </div>
+        <div class="error-msg-zh" data-lang="zh">
+            <span class="error-icon">⚠️</span> {zh_msg}
+        </div>
+    </div>
+    <script>
+        // 根据当前语言显示相应的错误消息
+        (function() {{
+            const errorContainer = document.getElementById('custom-error-container');
+            if (errorContainer) {{
+                const currentLang = window.currentLang || 'en'; // 默认英语
+                const errMsgs = errorContainer.querySelectorAll('[data-lang]');
+                errMsgs.forEach(msg => {{
+                    msg.style.display = msg.getAttribute('data-lang') === currentLang ? 'block' : 'none';
+                }});
+                
+                // 确保Gradio默认错误UI不显示
+                const defaultErrorElements = document.querySelectorAll('.error');
+                defaultErrorElements.forEach(el => {{
+                    el.style.display = 'none';
+                }});
+            }}
+        }})();
+    </script>
+    """ 
