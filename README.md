@@ -1,5 +1,5 @@
 ---
-title: FramePack图像到视频生成
+title: FramePack图像到视频生成(5秒限制版)
 emoji: 🎬
 colorFrom: indigo
 colorTo: purple
@@ -10,23 +10,45 @@ pinned: false
 license: mit
 ---
 
-# FramePack
+# FramePack - Image to Video Generation
 
-FramePack是一个图像到视频生成工具，利用扩散模型将静态图像转换为动态视频。
+This is a modified version of the FramePack model with a 5-second maximum video length limit.
+
+## Features
+
+- Generate realistic videos from still images
+- Simple and intuitive interface
+- Bilingual support (English/Chinese)
+- Maximum video length of 5 seconds to ensure quick generation times
+
+## Usage
+
+1. Upload an image
+2. Enter a prompt describing the desired motion
+3. Adjust parameters if needed (seed, video length, etc.)
+4. Click "Generate" and wait for the result
+
+## Technical Details
+
+This application uses the HunyuanVideo transformer model for image-to-video generation. The model has been optimized to work efficiently with videos up to 5 seconds in length.
+
+## Credits
+
+Based on the original FramePack model by lllyasviel.
 
 ## 特点
 
 - 使用单张图片生成流畅的动作视频
 - 基于HunyuanVideo和FramePack架构
 - 支持低显存GPU（最低6GB）运行
-- 可以生成最长120秒的视频
+- 可以生成最长5秒的视频
 - 使用TeaCache技术加速生成过程
 
 ## 使用方法
 
 1. 上传一张人物图像
 2. 输入描述所需动作的提示词
-3. 设置所需视频长度（秒）
+3. 设置所需视频长度（最大5秒）
 4. 点击"开始生成"按钮
 5. 等待视频生成（生成过程是渐进式的，会不断扩展视频长度）
 

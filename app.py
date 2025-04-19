@@ -23,7 +23,7 @@ translations = {
         "teacache_info": "Faster speed, but may result in slightly worse finger and hand generation.",
         "negative_prompt": "Negative Prompt",
         "seed": "Seed",
-        "video_length": "Video Length (seconds)",
+        "video_length": "Video Length (max 5 seconds)",
         "latent_window": "Latent Window Size",
         "steps": "Inference Steps",
         "steps_info": "Changing this value is not recommended.",
@@ -55,7 +55,7 @@ translations = {
         "teacache_info": "速度更快，但可能会使手指和手的生成效果稍差。",
         "negative_prompt": "负面提示词",
         "seed": "随机种子",
-        "video_length": "视频长度(秒)",
+        "video_length": "视频长度(最大5秒)",
         "latent_window": "潜在窗口大小",
         "steps": "推理步数",
         "steps_info": "不建议修改此值。",
@@ -420,6 +420,9 @@ def worker(input_image, prompt, n_prompt, seed, total_second_length, latent_wind
     global last_update_time
     last_update_time = time.time()
     
+    # 限制视频长度不超过5秒
+    total_second_length = min(total_second_length, 5.0)
+    
     # 获取模型
     try:
         models = get_models()
@@ -456,7 +459,7 @@ def worker(input_image, prompt, n_prompt, seed, total_second_length, latent_wind
         # 减小处理大小以加快CPU处理
         latent_window_size = min(latent_window_size, 5)
         steps = min(steps, 15)  # 减少步数
-        total_second_length = min(total_second_length, 2.0)  # 限制视频长度
+        total_second_length = min(total_second_length, 2.0)  # CPU模式下进一步限制视频长度
     
     total_latent_sections = (total_second_length * 30) / (latent_window_size * 4)
     total_latent_sections = int(max(round(total_latent_sections), 1))
@@ -1302,7 +1305,7 @@ with block:
                             "teacache_info": "Faster speed, but may result in slightly worse finger and hand generation.",
                             "negative_prompt": "Negative Prompt",
                             "seed": "Seed",
-                            "video_length": "Video Length (seconds)",
+                            "video_length": "Video Length (max 5 seconds)",
                             "latent_window": "Latent Window Size",
                             "steps": "Inference Steps",
                             "steps_info": "Changing this value is not recommended.",
@@ -1334,7 +1337,7 @@ with block:
                             "teacache_info": "速度更快，但可能会使手指和手的生成效果稍差。",
                             "negative_prompt": "负面提示词",
                             "seed": "随机种子",
-                            "video_length": "视频长度(秒)",
+                            "video_length": "视频长度(最大5秒)",
                             "latent_window": "潜在窗口大小",
                             "steps": "推理步数",
                             "steps_info": "不建议修改此值。",
@@ -1486,9 +1489,9 @@ with block:
                 # 添加slider-container类以便CSS触摸优化
                 with gr.Group(elem_classes="slider-container"):
                     total_second_length = gr.Slider(
-                        label="Video Length (seconds) / 视频长度(秒)", 
+                        label="Video Length (max 5 seconds) / 视频长度(最大5秒)", 
                         minimum=1, 
-                        maximum=120, 
+                        maximum=5, 
                         value=5, 
                         step=0.1
                     )
