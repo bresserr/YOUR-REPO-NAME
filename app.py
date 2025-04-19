@@ -672,10 +672,23 @@ def worker(input_image, prompt, n_prompt, seed, total_second_length, latent_wind
                 
                 try:
                     # 首先检查是否有停止信号
-                    if stream.input_queue.top() == 'end':
-                        print("检测到停止信号，中断采样过程...")
-                        stream.output_queue.push(('end', None))
-                        raise KeyboardInterrupt('用户主动结束任务')
+                    print(f"【调试】回调函数: 步骤 {d['i']}, 检查是否有停止信号")
+                    try:
+                        queue_top = stream.input_queue.top()
+                        print(f"【调试】回调函数: 队列顶部信号 = {queue_top}")
+                        
+                        if queue_top == 'end':
+                            print("【调试】回调函数: 检测到停止信号，准备中断...")
+                            try:
+                                stream.output_queue.push(('end', None))
+                                print("【调试】回调函数: 成功向输出队列推送end信号")
+                            except Exception as e:
+                                print(f"【调试】回调函数: 向输出队列推送end信号失败: {e}")
+                                
+                            print("【调试】回调函数: 即将抛出KeyboardInterrupt异常")
+                            raise KeyboardInterrupt('用户主动结束任务')
+                    except Exception as e:
+                        print(f"【调试】回调函数: 检查队列顶部信号出错: {e}")
                         
                     preview = d['denoised']
                     preview = vae_decode_fake(preview)
@@ -688,12 +701,15 @@ def worker(input_image, prompt, n_prompt, seed, total_second_length, latent_wind
                     hint = f'Sampling {current_step}/{steps}'
                     desc = f'Total generated frames: {int(max(0, total_generated_latent_frames * 4 - 3))}, Video length: {max(0, (total_generated_latent_frames * 4 - 3) / 30) :.2f} seconds (FPS-30). The video is being extended now ...'
                     stream.output_queue.push(('progress', (preview, desc, make_progress_bar_html(percentage, hint))))
-                except KeyboardInterrupt:
+                except KeyboardInterrupt as e:
                     # 捕获并重新抛出中断异常，确保它能传播到采样函数
+                    print(f"【调试】回调函数: 捕获到KeyboardInterrupt: {e}")
+                    print("【调试】回调函数: 重新抛出中断异常，确保传播到采样函数")
                     raise
                 except Exception as e:
-                    print(f"回调函数中出错: {e}")
+                    print(f"【调试】回调函数中出错: {e}")
                     # 不中断采样过程
+                print(f"【调试】回调函数: 步骤 {d['i']} 完成")
                 return
 
             try:
@@ -701,6 +717,7 @@ def worker(input_image, prompt, n_prompt, seed, total_second_length, latent_wind
                 print(f"开始采样，设备: {device}, 数据类型: {transformer.dtype}, 使用TeaCache: {use_teacache and not cpu_fallback_mode}")
                 
                 try:
+                    print("【调试】开始sample_hunyuan采样流程")
                     generated_latents = sample_hunyuan(
                         transformer=transformer,
                         sampler='unipc',
@@ -732,20 +749,26 @@ def worker(input_image, prompt, n_prompt, seed, total_second_length, latent_wind
                         callback=callback,
                     )
                     
-                    print(f"采样完成，用时: {time.time() - sampling_start_time:.2f}秒")
-                except KeyboardInterrupt:
+                    print(f"【调试】采样完成，用时: {time.time() - sampling_start_time:.2f}秒")
+                except KeyboardInterrupt as e:
                     # 用户主动中断
-                    print("用户主动中断采样过程")
+                    print(f"【调试】捕获到KeyboardInterrupt: {e}")
+                    print("【调试】用户主动中断采样过程，处理中断逻辑")
                     
                     # 如果已经有生成的视频，返回最后生成的视频
                     if last_output_filename:
+                        print(f"【调试】已有部分生成视频: {last_output_filename}，返回此视频")
                         stream.output_queue.push(('file', last_output_filename))
                         error_msg = "用户中断生成过程，但已生成部分视频"
                     else:
+                        print("【调试】没有部分生成视频，返回中断消息")
                         error_msg = "用户中断生成过程，未生成视频"
                     
+                    print(f"【调试】推送错误消息: {error_msg}")
                     stream.output_queue.push(('error', error_msg))
+                    print("【调试】推送end信号")
                     stream.output_queue.push(('end', None))
+                    print("【调试】中断处理完成，返回")
                     return
             except Exception as e:
                 print(f"采样过程中出错: {e}")
@@ -850,26 +873,39 @@ def worker(input_image, prompt, n_prompt, seed, total_second_length, latent_wind
             if is_last_section:
                 break
     except Exception as e:
-        print(f"处理过程中出现错误: {e}")
+        print(f"【调试】处理过程中出现错误: {e}, 类型: {type(e)}")
+        print(f"【调试】错误详情:")
         traceback.print_exc()
+        
+        # 检查是否是中断类型异常
+        if isinstance(e, KeyboardInterrupt):
+            print("【调试】捕获到外层KeyboardInterrupt异常")
 
         if not high_vram and not cpu_fallback_mode:
             try:
+                print("【调试】尝试卸载模型以释放资源")
                 unload_complete_models(
                     text_encoder, text_encoder_2, image_encoder, vae, transformer
                 )
-            except Exception:
+                print("【调试】模型卸载成功")
+            except Exception as unload_error:
+                print(f"【调试】卸载模型时出错: {unload_error}")
                 pass
         
         # 如果已经有生成的视频，返回最后生成的视频
         if last_output_filename:
+            print(f"【调试】外层异常处理: 返回已生成的部分视频 {last_output_filename}")
             stream.output_queue.push(('file', last_output_filename))
+        else:
+            print("【调试】外层异常处理: 未找到已生成的视频")
         
         # 返回错误信息
         error_msg = f"处理过程中出现错误: {e}"
+        print(f"【调试】外层异常处理: 推送错误信息: {error_msg}")
         stream.output_queue.push(('error', error_msg))
 
     # 确保总是返回end信号
+    print("【调试】工作函数结束，推送end信号")
     stream.output_queue.push(('end', None))
     return
 
@@ -1032,12 +1068,32 @@ else:
 
 def end_process():
     """停止生成过程函数 - 通过在队列中推送'end'信号来中断生成"""
-    print("用户点击了停止按钮，发送停止信号...")
+    print("【调试】用户点击了停止按钮，发送停止信号...")
     # 确保stream已初始化
     if 'stream' in globals() and stream is not None:
-        stream.input_queue.push('end')
+        # 在推送前检查队列状态
+        try:
+            current_top = stream.input_queue.top()
+            print(f"【调试】当前队列顶部信号: {current_top}")
+        except Exception as e:
+            print(f"【调试】检查队列状态出错: {e}")
+            
+        # 推送end信号
+        try:
+            stream.input_queue.push('end')
+            print("【调试】成功推送end信号到队列")
+            
+            # 验证信号是否成功推送
+            try:
+                current_top_after = stream.input_queue.top()
+                print(f"【调试】推送后队列顶部信号: {current_top_after}")
+            except Exception as e:
+                print(f"【调试】验证推送后队列状态出错: {e}")
+                
+        except Exception as e:
+            print(f"【调试】推送end信号到队列失败: {e}")
     else:
-        print("警告: stream未初始化，无法发送停止信号")
+        print("【调试】警告: stream未初始化，无法发送停止信号")
     return None
 
 
