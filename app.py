@@ -1,5 +1,3 @@
-from diffusers_helper.hf_login import login
-
 import os
 import threading
 import time
@@ -468,6 +466,9 @@ def worker(
     global last_update_time
     last_update_time = time.time()
 
+    # 요청 사항: 기본 2초로 설정, 5초까지 가능.
+    # 아래는 슬라이더에서 이미 min=1, max=5로 설정되어 있으며, 기본값을 2로 수정하였음.
+    # 내부 로직에서도 최대 5초 이상은 못 가도록 처리
     total_second_length = min(total_second_length, 5.0)
 
     try:
@@ -1067,13 +1068,13 @@ quick_prompts = [
     ["A character doing some simple body movements."]
 ]
 
-# CSS
+# CSS (파스텔 톤 스타일)
 def make_custom_css():
     base_progress_css = make_progress_bar_css()
-    enhanced_css = """
-    /* Visual & layout improvement */
+    pastel_css = """
+    /* 파스텔 톤, 좀 더 부드럽고 세련된 UI 스타일 */
     body {
-        background: #f9fafb !important; 
+        background: #faf9ff !important; 
         font-family: "Noto Sans", sans-serif;
     }
     #app-container {
@@ -1083,35 +1084,39 @@ def make_custom_css():
         position: relative;
     }
     #app-container h1 {
-        color: #2d3748;
+        color: #5F5AA2;
         margin-bottom: 1.2rem;
         font-weight: 700;
+        text-shadow: 1px 1px 2px #bbb;
     }
     .gr-panel {
-        background: #fff;
-        border: 1px solid #cbd5e0;
+        background: #ffffffcc;
+        border: 1px solid #e1dff0;
         border-radius: 8px;
         padding: 1rem;
-        box-shadow: 0 1px 2px rgba(0,0,0,0.1);
+        box-shadow: 0 1px 3px rgba(0,0,0,0.1);
     }
     .button-container button {
         min-height: 45px;
         font-size: 1rem;
         font-weight: 600;
+        border-radius: 6px;
     }
     .button-container button#start-button {
-        background-color: #3182ce !important;
+        background-color: #A289E3 !important;
         color: #fff !important;
+        border: 1px solid #a58de2;
     }
     .button-container button#stop-button {
-        background-color: #e53e3e !important;
+        background-color: #F48A9B !important;
         color: #fff !important;
+        border: 1px solid #f18fa0;
     }
     .button-container button:hover {
         filter: brightness(0.95);
     }
     .preview-container, .video-container {
-        border: 1px solid #cbd5e0;
+        border: 1px solid #ded9f2;
         border-radius: 8px;
         overflow: hidden;
     }
@@ -1120,15 +1125,16 @@ def make_custom_css():
         margin-bottom: 15px;
     }
     .error-message {
-        background-color: #fff5f5;
-        border: 1px solid #fed7d7;
-        color: #e53e3e;
+        background-color: #FFF5F5;
+        border: 1px solid #FED7D7;
+        color: #E53E3E;
         padding: 10px;
         border-radius: 4px;
         margin-top: 10px;
+        font-weight: 500;
     }
     .error-icon {
-        color: #e53e3e;
+        color: #E53E3E;
         margin-right: 8px;
     }
     #error-message {
@@ -1150,7 +1156,7 @@ def make_custom_css():
         }
     }
     """
-    return base_progress_css + enhanced_css
+    return base_progress_css + pastel_css
 
 css = make_custom_css()
 
@@ -1233,11 +1239,12 @@ with block:
             value=31337,
             precision=0
         )
+        # 여기서 기본값(value)을 2로 변경 (최대 5는 그대로 유지)
         total_second_length = gr.Slider(
             label=get_translation("video_length"),
             minimum=1,
             maximum=5,
-            value=5,
+            value=2,
             step=0.1
         )
         latent_window_size = gr.Slider(
