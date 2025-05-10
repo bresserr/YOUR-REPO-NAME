@@ -416,7 +416,8 @@ def worker(
                 unload_complete_models()
 
             output_filename = os.path.join(outputs_folder, f'{job_id}_{total_generated_latent_frames}.mp4')
-            save_bcthw_as_mp4(history_pixels, output_filename, fps=30, crf=mp4_crf)
+
+            save_bcthw_as_mp4(history_pixels, output_filename, fps=30)
 
             print(f'Decoded. Latent shape {real_history_latents.shape}; pixel shape {history_pixels.shape}')
 
