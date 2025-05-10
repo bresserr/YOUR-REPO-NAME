@@ -706,13 +706,6 @@ with block:
             progress_desc = gr.Markdown('', elem_classes='no-generating-animation')
             progress_bar = gr.HTML('', elem_classes='no-generating-animation')
 
-    # Extra info
-    gr.HTML("""
-    <div style="text-align:center; margin-top:20px;">
-      Share your outputs or get inspired by searching 
-      <a href="https://x.com/search?q=framepack&f=live" target="_blank">#framepack</a> on Twitter!
-    </div>
-    """)
 
     ips = [
         input_image, prompt, t2v, n_prompt, seed,
@@ -727,13 +720,5 @@ with block:
     )
     end_button.click(fn=end_process)
 
-    # If you want examples, uncomment below:
-    # gr.Examples(
-    #     examples=examples,
-    #     inputs=[input_image, prompt],
-    #     outputs=[result_video, preview_image, progress_desc, progress_bar, start_button, end_button],
-    #     fn=generate_examples,
-    #     cache_examples=True
-    # )
 
 block.launch(share=True)
