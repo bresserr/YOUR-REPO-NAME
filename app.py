@@ -47,13 +47,14 @@ from transformers import SiglipImageProcessor, SiglipVisionModel
 from diffusers_helper.clip_vision import hf_clip_vision_encode
 from diffusers_helper.bucket_tools import find_nearest_bucket
 
-
+# Check GPU memory
 free_mem_gb = get_cuda_free_memory_gb(gpu)
 high_vram = free_mem_gb > 60
 
 print(f'Free VRAM {free_mem_gb} GB')
 print(f'High-VRAM Mode: {high_vram}')
 
+# Load models
 text_encoder = LlamaModel.from_pretrained(
     "hunyuanvideo-community/HunyuanVideo",
     subfolder='text_encoder',
@@ -93,12 +94,14 @@ transformer = HunyuanVideoTransformer3DModelPacked.from_pretrained(
     torch_dtype=torch.bfloat16
 ).cpu()
 
+# Evaluation mode
 vae.eval()
 text_encoder.eval()
 text_encoder_2.eval()
 image_encoder.eval()
 transformer.eval()
 
+# Slicing/Tiling for low VRAM
 if not high_vram:
     vae.enable_slicing()
     vae.enable_tiling()
@@ -106,20 +109,22 @@ if not high_vram:
 transformer.high_quality_fp32_output_for_inference = True
 print('transformer.high_quality_fp32_output_for_inference = True')
 
+# Move to correct dtype
 transformer.to(dtype=torch.bfloat16)
 vae.to(dtype=torch.float16)
 image_encoder.to(dtype=torch.float16)
 text_encoder.to(dtype=torch.float16)
 text_encoder_2.to(dtype=torch.float16)
 
+# No gradient
 vae.requires_grad_(False)
 text_encoder.requires_grad_(False)
 text_encoder_2.requires_grad_(False)
 image_encoder.requires_grad_(False)
 transformer.requires_grad_(False)
 
+# DynamicSwap if low VRAM
 if not high_vram:
-    # DynamicSwapInstaller is same as huggingface's enable_sequential_offload but 3x faster
     DynamicSwapInstaller.install_model(transformer, device=gpu)
     DynamicSwapInstaller.install_model(text_encoder, device=gpu)
 else:
@@ -140,6 +145,7 @@ examples = [
     ["img_examples/3.png", "The woman dances elegantly among the blossoms, spinning slowly with flowing sleeves and graceful hand movements."]
 ]
 
+# Example generation (optional)
 def generate_examples(input_image, prompt):
     t2v=False
     n_prompt=""
@@ -192,7 +198,8 @@ def generate_examples(input_image, prompt):
             yield (
                 gr.update(),
                 gr.update(visible=True, value=preview),
-                desc, html,
+                desc,
+                html,
                 gr.update(interactive=False),
                 gr.update(interactive=True)
             )
@@ -211,98 +218,69 @@ def generate_examples(input_image, prompt):
 @torch.no_grad()
 def worker(
     input_image, prompt, n_prompt, seed,
-    total_second_length, latent_window_size,
-    steps, cfg, gs, rs,
-    gpu_memory_preservation, use_teacache, mp4_crf
+    total_second_length, latent_window_size, steps,
+    cfg, gs, rs, gpu_memory_preservation, use_teacache, mp4_crf
 ):
+    # Calculate total sections
     total_latent_sections = (total_second_length * 30) / (latent_window_size * 4)
     total_latent_sections = int(max(round(total_latent_sections), 1))
 
     job_id = generate_timestamp()
 
-    stream.output_queue.push(
-        ('progress', (None, '', make_progress_bar_html(0, 'Starting ...')))
-    )
+    stream.output_queue.push(('progress', (None, '', make_progress_bar_html(0, 'Starting ...'))))
 
     try:
-        # Clean GPU if VRAM is low
+        # Unload if VRAM is low
         if not high_vram:
             unload_complete_models(
                 text_encoder, text_encoder_2, image_encoder, vae, transformer
             )
 
         # Text encoding
-        stream.output_queue.push(
-            ('progress', (None, '', make_progress_bar_html(0, 'Text encoding ...')))
-        )
+        stream.output_queue.push(('progress', (None, '', make_progress_bar_html(0, 'Text encoding ...'))))
 
         if not high_vram:
             fake_diffusers_current_device(text_encoder, gpu)
             load_model_as_complete(text_encoder_2, target_device=gpu)
 
-        llama_vec, clip_l_pooler = encode_prompt_conds(
-            prompt, text_encoder, text_encoder_2,
-            tokenizer, tokenizer_2
-        )
+        llama_vec, clip_l_pooler = encode_prompt_conds(prompt, text_encoder, text_encoder_2, tokenizer, tokenizer_2)
 
         if cfg == 1:
-            llama_vec_n, clip_l_pooler_n = (
-                torch.zeros_like(llama_vec),
-                torch.zeros_like(clip_l_pooler)
-            )
+            llama_vec_n, clip_l_pooler_n = torch.zeros_like(llama_vec), torch.zeros_like(clip_l_pooler)
         else:
-            llama_vec_n, clip_l_pooler_n = encode_prompt_conds(
-                n_prompt, text_encoder, text_encoder_2,
-                tokenizer, tokenizer_2
-            )
+            llama_vec_n, clip_l_pooler_n = encode_prompt_conds(n_prompt, text_encoder, text_encoder_2, tokenizer, tokenizer_2)
 
         llama_vec, llama_attention_mask = crop_or_pad_yield_mask(llama_vec, length=512)
         llama_vec_n, llama_attention_mask_n = crop_or_pad_yield_mask(llama_vec_n, length=512)
 
-        # Processing input image
-        stream.output_queue.push(
-            ('progress', (None, '', make_progress_bar_html(0, 'Image processing ...')))
-        )
+        # Process image
+        stream.output_queue.push(('progress', (None, '', make_progress_bar_html(0, 'Image processing ...'))))
 
         H, W, C = input_image.shape
         height, width = find_nearest_bucket(H, W, resolution=640)
-        input_image_np = resize_and_center_crop(
-            input_image,
-            target_width=width,
-            target_height=height
-        )
+        input_image_np = resize_and_center_crop(input_image, target_width=width, target_height=height)
 
-        Image.fromarray(input_image_np).save(
-            os.path.join(outputs_folder, f'{job_id}.png')
-        )
+        Image.fromarray(input_image_np).save(os.path.join(outputs_folder, f'{job_id}.png'))
 
         input_image_pt = torch.from_numpy(input_image_np).float() / 127.5 - 1
         input_image_pt = input_image_pt.permute(2, 0, 1)[None, :, None]
 
         # VAE encoding
-        stream.output_queue.push(
-            ('progress', (None, '', make_progress_bar_html(0, 'VAE encoding ...')))
-        )
+        stream.output_queue.push(('progress', (None, '', make_progress_bar_html(0, 'VAE encoding ...'))))
 
         if not high_vram:
             load_model_as_complete(vae, target_device=gpu)
-
         start_latent = vae_encode(input_image_pt, vae)
 
         # CLIP Vision
-        stream.output_queue.push(
-            ('progress', (None, '', make_progress_bar_html(0, 'CLIP Vision encoding ...')))
-        )
+        stream.output_queue.push(('progress', (None, '', make_progress_bar_html(0, 'CLIP Vision encoding ...'))))
 
         if not high_vram:
             load_model_as_complete(image_encoder, target_device=gpu)
-
-        image_encoder_output = hf_clip_vision_encode(
-            input_image_np, feature_extractor, image_encoder
-        )
+        image_encoder_output = hf_clip_vision_encode(input_image_np, feature_extractor, image_encoder)
         image_encoder_last_hidden_state = image_encoder_output.last_hidden_state
 
-        # Dtype
+        # Convert dtype
         llama_vec = llama_vec.to(transformer.dtype)
         llama_vec_n = llama_vec_n.to(transformer.dtype)
         clip_l_pooler = clip_l_pooler.to(transformer.dtype)
@@ -310,9 +288,7 @@ def worker(
         image_encoder_last_hidden_state = image_encoder_last_hidden_state.to(transformer.dtype)
 
         # Start sampling
-        stream.output_queue.push(
-            ('progress', (None, '', make_progress_bar_html(0, 'Start sampling ...')))
-        )
+        stream.output_queue.push(('progress', (None, '', make_progress_bar_html(0, 'Start sampling ...'))))
 
         rnd = torch.Generator("cpu").manual_seed(seed)
 
@@ -322,10 +298,8 @@ def worker(
         ).cpu()
         history_pixels = None
 
-        history_latents = torch.cat(
-            [history_latents, start_latent.to(history_latents)],
-            dim=2
-        )
+        # Add start_latent
+        history_latents = torch.cat([history_latents, start_latent.to(history_latents)], dim=2)
         total_generated_latent_frames = 1
 
         for section_index in range(total_latent_sections):
@@ -351,10 +325,7 @@ def worker(
                 preview = d['denoised']
                 preview = vae_decode_fake(preview)
                 preview = (preview * 255.0).detach().cpu().numpy().clip(0, 255).astype(np.uint8)
-                preview = einops.rearrange(
-                    preview,
-                    'b c t h w -> (b h) (t w) c'
-                )
+                preview = einops.rearrange(preview, 'b c t h w -> (b h) (t w) c')
 
                 if stream.input_queue.top() == 'end':
                     stream.output_queue.push(('end', None))
@@ -363,15 +334,12 @@ def worker(
                 current_step = d['i'] + 1
                 percentage = int(100.0 * current_step / steps)
                 hint = f'Sampling {current_step}/{steps}'
-                desc = f'Section {section_index+1}/{total_latent_sections}'
-                stream.output_queue.push(
-                    ('progress', (preview, desc, make_progress_bar_html(percentage, hint)))
-                )
+                desc = f'Total generated frames: {int(max(0, total_generated_latent_frames * 4 - 3))}'
+                stream.output_queue.push(('progress', (preview, desc, make_progress_bar_html(percentage, hint))))
                 return
 
             indices = torch.arange(
-                0,
-                sum([1, 16, 2, 1, latent_window_size])
+                0, sum([1, 16, 2, 1, latent_window_size])
             ).unsqueeze(0)
             (
                 clean_latent_indices_start,
@@ -380,14 +348,13 @@ def worker(
                 clean_latent_1x_indices,
                 latent_indices
             ) = indices.split([1, 16, 2, 1, latent_window_size], dim=1)
-            clean_latent_indices = torch.cat(
-                [clean_latent_indices_start, clean_latent_1x_indices],
-                dim=1
-            )
+
+            clean_latent_indices = torch.cat([clean_latent_indices_start, clean_latent_1x_indices], dim=1)
 
             clean_latents_4x, clean_latents_2x, clean_latents_1x = history_latents[
                 :, :, -sum([16, 2, 1]):, :, :
             ].split([16, 2, 1], dim=2)
+
             clean_latents = torch.cat(
                 [start_latent.to(history_latents), clean_latents_1x],
                 dim=2
@@ -424,21 +391,13 @@ def worker(
             )
 
             total_generated_latent_frames += int(generated_latents.shape[2])
-            history_latents = torch.cat(
-                [history_latents, generated_latents.to(history_latents)],
-                dim=2
-            )
+            history_latents = torch.cat([history_latents, generated_latents.to(history_latents)], dim=2)
 
             if not high_vram:
-                offload_model_from_device_for_memory_preservation(
-                    transformer, target_device=gpu,
-                    preserved_memory_gb=8
-                )
+                offload_model_from_device_for_memory_preservation(transformer, target_device=gpu, preserved_memory_gb=8)
                 load_model_as_complete(vae, target_device=gpu)
 
-            real_history_latents = history_latents[
-                :, :, -total_generated_latent_frames:, :, :
-            ]
+            real_history_latents = history_latents[:, :, -total_generated_latent_frames:, :, :]
 
             if history_pixels is None:
                 history_pixels = vae_decode(real_history_latents, vae).cpu()
@@ -456,75 +415,55 @@ def worker(
             if not high_vram:
                 unload_complete_models()
 
-            output_filename = os.path.join(
-                outputs_folder, f'{job_id}_{total_generated_latent_frames}.mp4'
-            )
+            output_filename = os.path.join(outputs_folder, f'{job_id}_{total_generated_latent_frames}.mp4')
+            save_bcthw_as_mp4(history_pixels, output_filename, fps=30, crf=mp4_crf)
 
-            save_bcthw_as_mp4(
-                history_pixels, output_filename,
-                fps=30, crf=mp4_crf
-            )
-
-            print(
-                f'Decoded. Current latent shape {real_history_latents.shape}; pixel shape {history_pixels.shape}'
-            )
+            print(f'Decoded. Latent shape {real_history_latents.shape}; pixel shape {history_pixels.shape}')
 
             stream.output_queue.push(('file', output_filename))
 
     except:
         traceback.print_exc()
         if not high_vram:
-            unload_complete_models(
-                text_encoder, text_encoder_2, image_encoder, vae, transformer
-            )
+            unload_complete_models(text_encoder, text_encoder_2, image_encoder, vae, transformer)
 
     stream.output_queue.push(('end', None))
     return
 
 def get_duration(
-    input_image, prompt, t2v, n_prompt, seed,
-    total_second_length, latent_window_size, steps,
-    cfg, gs, rs, gpu_memory_preservation, use_teacache, mp4_crf
+    input_image, prompt, t2v, n_prompt,
+    seed, total_second_length, latent_window_size,
+    steps, cfg, gs, rs, gpu_memory_preservation,
+    use_teacache, mp4_crf
 ):
     return total_second_length * 60
 
 @spaces.GPU(duration=get_duration)
 def process(
-    input_image, prompt, t2v=False, n_prompt="",
-    seed=31337, total_second_length=5, latent_window_size=9,
-    steps=25, cfg=1.0, gs=10.0, rs=0.0,
-    gpu_memory_preservation=6, use_teacache=True, mp4_crf=16
+    input_image, prompt, t2v=False, n_prompt="", seed=31337,
+    total_second_length=5, latent_window_size=9, steps=25,
+    cfg=1.0, gs=10.0, rs=0.0, gpu_memory_preservation=6,
+    use_teacache=True, mp4_crf=16
 ):
     global stream
-
     if t2v:
         default_height, default_width = 640, 640
-        input_image = np.ones(
-            (default_height, default_width, 3),
-            dtype=np.uint8
-        ) * 255
+        input_image = np.ones((default_height, default_width, 3), dtype=np.uint8) * 255
         print("No input image provided. Using a blank white image.")
     else:
-        # ImageEditor에서 받은 composite RGBA를 분리
         composite_rgba_uint8 = input_image["composite"]
 
-        # rgb_uint8: (H,W,3)
         rgb_uint8 = composite_rgba_uint8[:, :, :3]
-        # mask_uint8: (H,W)
         mask_uint8 = composite_rgba_uint8[:, :, 3]
 
-        # 흰색 배경
         h, w = rgb_uint8.shape[:2]
         background_uint8 = np.full((h, w, 3), 255, dtype=np.uint8)
 
-        # 알파 노멀라이즈
         alpha_normalized_float32 = mask_uint8.astype(np.float32) / 255.0
         alpha_mask_float32 = np.stack([alpha_normalized_float32]*3, axis=2)
 
-        # 알파 블렌딩
-        blended_image_float32 = \
-            rgb_uint8.astype(np.float32) * alpha_mask_float32 + \
-            background_uint8.astype(np.float32) * (1.0 - alpha_mask_float32)
+        blended_image_float32 = rgb_uint8.astype(np.float32) * alpha_mask_float32 + \
+                                background_uint8.astype(np.float32) * (1.0 - alpha_mask_float32)
 
         input_image = np.clip(blended_image_float32, 0, 255).astype(np.uint8)
 
@@ -559,7 +498,8 @@ def process(
             yield (
                 gr.update(),
                 gr.update(visible=True, value=preview),
-                desc, html,
+                desc,
+                html,
                 gr.update(interactive=False),
                 gr.update(interactive=True)
             )
@@ -578,16 +518,16 @@ def process(
 def end_process():
     stream.input_queue.push('end')
 
+
 quick_prompts = [
     'The girl dances gracefully, with clear movements, full of charm.',
     'A character doing some simple body movements.'
 ]
 quick_prompts = [[x] for x in quick_prompts]
 
-# 기존 CSS + 추가로 UI 개선용
+
 def make_custom_css():
     base_progress_css = make_progress_bar_css()
-    # 아래는 예시로 약간 더 파스텔 톤의 스타일 및 카드형 UI
     extra_css = """
     body {
         background: #fafbfe !important;
@@ -595,14 +535,14 @@ def make_custom_css():
     }
     #title-container {
         text-align: center;
-        padding: 30px;
+        padding: 20px 0;
         background: linear-gradient(135deg, #a8c0ff 0%, #fbc2eb 100%);
-        border-radius: 0 0 16px 16px;
+        border-radius: 0 0 10px 10px;
         margin-bottom: 20px;
     }
     #title-container h1 {
         color: white;
-        font-size: 2.2rem;
+        font-size: 2rem;
         margin: 0;
         font-weight: 800;
         text-shadow: 1px 2px 2px rgba(0,0,0,0.1);
@@ -650,35 +590,30 @@ css = make_custom_css()
 
 block = gr.Blocks(css=css).queue()
 with block:
-    # 상단 그라디언트 영역
-    with gr.Box(elem_id="title-container"):
+    # Title (use gr.Group instead of gr.Box for older Gradio versions)
+    with gr.Group(elem_id="title-container"):
         gr.Markdown("<h1>FramePack I2V</h1>")
 
-    # 설명 부분
     gr.Markdown("""
     ### Video diffusion, but feels like image diffusion
-    FramePack I2V - a model that predicts future frames from history frames,
-    enabling you to generate short animations from a single image and a text prompt.<br><br>
-    ***beta FramePack Fill*** - You can also paint over the input image to inpaint the video output.
+    FramePack I2V - a model that predicts future frames from past frames,
+    letting you generate short animations from a single image plus text prompt.
     """)
 
     with gr.Row():
         with gr.Column():
             input_image = gr.ImageEditor(
                 type="numpy",
-                label="Image (click 'Brush' tool to mask)",
+                label="Image Editor (use Brush for mask)",
                 height=320,
                 brush=gr.Brush(colors=["#ffffff"])
             )
             prompt = gr.Textbox(label="Prompt", value='')
+            t2v = gr.Checkbox(label="Only Text to Video (ignore image)?", value=False)
 
-            t2v = gr.Checkbox(
-                label="Generate from Text Only (no image)?",
-                value=False
-            )
             example_quick_prompts = gr.Dataset(
                 samples=quick_prompts,
-                label="Quick Prompt Picks",
+                label="Quick Prompts",
                 samples_per_page=1000,
                 components=[prompt]
             )
@@ -695,7 +630,7 @@ with block:
                 end_button = gr.Button(value="Stop Generation", elem_id="stop-button", interactive=False)
 
             total_second_length = gr.Slider(
-                label="Total Video Length (sec)",
+                label="Total Video Length (Seconds)",
                 minimum=1,
                 maximum=5,
                 value=2,
@@ -707,87 +642,81 @@ with block:
                     use_teacache = gr.Checkbox(
                         label='Use TeaCache',
                         value=True,
-                        info='Faster speed but can degrade finger/hand details'
+                        info='Faster speed, but may worsen hands/fingers.'
                     )
                     n_prompt = gr.Textbox(label="Negative Prompt", value="", visible=False)
                     seed = gr.Number(label="Seed", value=31337, precision=0)
-
                     latent_window_size = gr.Slider(
                         label="Latent Window Size",
-                        minimum=1,
-                        maximum=33,
-                        value=9,
-                        step=1,
+                        minimum=1, maximum=33,
+                        value=9, step=1,
                         visible=False
                     )
                     steps = gr.Slider(
                         label="Steps",
-                        minimum=1,
-                        maximum=100,
-                        value=25,
-                        step=1,
-                        info='Not recommended to change significantly.'
+                        minimum=1, maximum=100,
+                        value=25, step=1,
+                        info='Not recommended to change drastically.'
                     )
                     cfg = gr.Slider(
                         label="CFG Scale",
-                        minimum=1.0,
-                        maximum=32.0,
-                        value=1.0,
-                        step=0.01,
+                        minimum=1.0, maximum=32.0,
+                        value=1.0, step=0.01,
                         visible=False
                     )
                     gs = gr.Slider(
                         label="Distilled CFG Scale",
-                        minimum=1.0,
-                        maximum=32.0,
-                        value=10.0,
-                        step=0.01,
-                        info='Not recommended to change significantly.'
+                        minimum=1.0, maximum=32.0,
+                        value=10.0, step=0.01,
+                        info='Not recommended to change drastically.'
                     )
                     rs = gr.Slider(
                         label="CFG Re-Scale",
-                        minimum=0.0,
-                        maximum=1.0,
-                        value=0.0,
-                        step=0.01,
+                        minimum=0.0, maximum=1.0,
+                        value=0.0, step=0.01,
                         visible=False
                     )
                     gpu_memory_preservation = gr.Slider(
                         label="GPU Memory Preservation (GB)",
-                        minimum=6,
-                        maximum=128,
-                        value=6,
-                        step=0.1,
-                        info="Increase if OOM occurs (slower speed)."
+                        minimum=6, maximum=128,
+                        value=6, step=0.1,
+                        info="Increase if OOM occurs, but slower."
                     )
                     mp4_crf = gr.Slider(
                         label="MP4 Compression (CRF)",
-                        minimum=0,
-                        maximum=100,
-                        value=16,
-                        step=1,
-                        info="Lower is higher quality. 16 is recommended."
+                        minimum=0, maximum=100,
+                        value=16, step=1,
+                        info="Lower = better quality. 16 recommended."
                     )
 
         with gr.Column():
-            preview_image = gr.Image(label="Preview Latents", height=200, visible=False)
-            result_video = gr.Video(label="Generated Video", autoplay=True, height=512, loop=True)
-
+            preview_image = gr.Image(
+                label="Preview Latents",
+                height=200,
+                visible=False
+            )
+            result_video = gr.Video(
+                label="Finished Frames",
+                autoplay=True,
+                show_share_button=False,
+                height=512,
+                loop=True
+            )
             progress_desc = gr.Markdown('', elem_classes='no-generating-animation')
             progress_bar = gr.HTML('', elem_classes='no-generating-animation')
 
+    # Extra info
     gr.HTML("""
     <div style="text-align:center; margin-top:20px;">
-        Share your creations or find inspiration by searching 
-        <a href="https://x.com/search?q=framepack&f=live" target="_blank">#framepack</a> on Twitter (X)!
+      Share your outputs or get inspired by searching 
+      <a href="https://x.com/search?q=framepack&f=live" target="_blank">#framepack</a> on Twitter!
     </div>
     """)
 
-    # 함수 연결
     ips = [
         input_image, prompt, t2v, n_prompt, seed,
-        total_second_length, latent_window_size, steps,
-        cfg, gs, rs, gpu_memory_preservation,
+        total_second_length, latent_window_size,
+        steps, cfg, gs, rs, gpu_memory_preservation,
         use_teacache, mp4_crf
     ]
     start_button.click(
@@ -797,7 +726,7 @@ with block:
     )
     end_button.click(fn=end_process)
 
-    # 예제 버튼 (원한다면 주석 해제)
+    # If you want examples, uncomment below:
     # gr.Examples(
     #     examples=examples,
     #     inputs=[input_image, prompt],
