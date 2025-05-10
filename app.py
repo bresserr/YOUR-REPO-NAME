@@ -1,3 +1,8 @@
+########################################
+# from diffusers_helper.hf_login import login
+# 필요 시 로그인 함수 사용 (주석 해제 후)
+########################################
+
 import os
 import threading
 import time
@@ -23,7 +28,7 @@ translations = {
         "teacache_info": "Faster speed, but may result in slightly worse finger and hand generation.",
         "negative_prompt": "Negative Prompt",
         "seed": "Seed",
-        "video_length": "Video Length (max 5 seconds)",
+        "video_length": "Video Length (max 4 seconds)",
         "latent_window": "Latent Window Size",
         "steps": "Inference Steps",
         "steps_info": "Changing this value is not recommended.",
@@ -189,16 +194,19 @@ def load_models():
         print(f"Device: {device}, VAE/Encoders dtype={dtype}, Transformer dtype={transformer_dtype}")
 
         try:
+            # (1) 텍스트 인코더
             text_encoder = LlamaModel.from_pretrained(
                 "hunyuanvideo-community/HunyuanVideo",
                 subfolder='text_encoder',
                 torch_dtype=dtype
             ).to(model_device)
+
             text_encoder_2 = CLIPTextModel.from_pretrained(
                 "hunyuanvideo-community/HunyuanVideo",
                 subfolder='text_encoder_2',
                 torch_dtype=dtype
             ).to(model_device)
+
             tokenizer = LlamaTokenizerFast.from_pretrained(
                 "hunyuanvideo-community/HunyuanVideo",
                 subfolder='tokenizer'
@@ -207,12 +215,15 @@ def load_models():
                 "hunyuanvideo-community/HunyuanVideo",
                 subfolder='tokenizer_2'
             )
+
+            # (2) VAE
             vae = AutoencoderKLHunyuanVideo.from_pretrained(
                 "hunyuanvideo-community/HunyuanVideo",
                 subfolder='vae',
                 torch_dtype=dtype
             ).to(model_device)
 
+            # (3) CLIP Vision
             feature_extractor = SiglipImageProcessor.from_pretrained(
                 "lllyasviel/flux_redux_bfl", subfolder='feature_extractor'
             )
@@ -222,8 +233,13 @@ def load_models():
                 torch_dtype=dtype
             ).to(model_device)
 
+            # (4) Transformer (FramePack_F1)
+            #
+            # 기존: "lllyasviel/FramePackI2V_HY"
+            # 변경: "lllyasviel/FramePack_F1_I2V_HY_20250503" (2번째 코드에서 제시됨)
+            #
             transformer = HunyuanVideoTransformer3DModelPacked.from_pretrained(
-                "lllyasviel/FramePackI2V_HY",
+                "lllyasviel/FramePack_F1_I2V_HY_20250503",
                 torch_dtype=transformer_dtype
             ).to(model_device)
 
@@ -269,7 +285,7 @@ def load_models():
             ).to('cpu')
 
             transformer = HunyuanVideoTransformer3DModelPacked.from_pretrained(
-                "lllyasviel/FramePackI2V_HY",
+                "lllyasviel/FramePack_F1_I2V_HY_20250503",
                 torch_dtype=transformer_dtype
             ).to('cpu')
 
@@ -285,6 +301,7 @@ def load_models():
             vae.enable_slicing()
             vae.enable_tiling()
 
+        # FramePack_F1 모델에서 필요
         transformer.high_quality_fp32_output_for_inference = True
         print("transformer.high_quality_fp32_output_for_inference = True")
 
@@ -304,6 +321,7 @@ def load_models():
         if torch.cuda.is_available() and not cpu_fallback_mode:
             try:
                 if not high_vram:
+                    # VRAM이 적다면 DynamicSwapInstaller로 필요 시 GPU/CPU 스왑
                     DynamicSwapInstaller.install_model(transformer, device=device)
                     DynamicSwapInstaller.install_model(text_encoder, device=device)
                 else:
@@ -338,7 +356,7 @@ def load_models():
         cpu_fallback_mode = True
         return {}
 
-# GPU 데코레이터 사용 여부 (Spaces 전용)
+# GPU 데코레이터 (Spaces 전용)
 if IN_HF_SPACE and 'spaces' in globals() and GPU_AVAILABLE:
     try:
         @spaces.GPU
@@ -404,7 +422,6 @@ def get_models():
 
 stream = AsyncStream()
 
-# 오류 메시지 HTML 생성 함수(영어만)
 def create_error_html(error_msg, is_timeout=False):
     """
     Create a user-friendly error message in English only
@@ -461,15 +478,13 @@ def worker(
     use_teacache
 ):
     """
-    Actual generation logic in background thread.
+    최종 영상 생성 로직 (백그라운드에서 동작)
     """
     global last_update_time
     last_update_time = time.time()
 
-    # 요청 사항: 기본 2초로 설정, 5초까지 가능.
-    # 아래는 슬라이더에서 이미 min=1, max=5로 설정되어 있으며, 기본값을 2로 수정하였음.
-    # 내부 로직에서도 최대 5초 이상은 못 가도록 처리
-    total_second_length = min(total_second_length, 5.0)
+    # 기본 2초, 최대 4초로 제한
+    total_second_length = min(total_second_length, 4.0)
 
     try:
         models_local = get_models()
@@ -499,47 +514,44 @@ def worker(
     device = 'cuda' if (GPU_AVAILABLE and not cpu_fallback_mode) else 'cpu'
     print(f"Inference device: {device}")
 
-    if cpu_fallback_mode:
-        print("CPU fallback mode: reducing some parameters for performance.")
-        latent_window_size = min(latent_window_size, 5)
-        steps = min(steps, 15)
-        total_second_length = min(total_second_length, 2.0)
+    # total_second_length만큼 30fps로 만들 때, latent_window_size*4-3 프레임 단위가 여러 번 이어져야 함.
+    # 단순히 (총초 * fps)/(latent_window_size*4-3) 로 반복 횟수를 구함
+    # 2번째 예시 코드처럼, 섹션 반복 방식으로 구현
 
+    # 'FramePack_F1' 모델 기준으로, 아래 방식으로 "조금씩" 영상을 확장해가며 샘플링
     total_latent_sections = (total_second_length * 30) / (latent_window_size * 4)
     total_latent_sections = int(max(round(total_latent_sections), 1))
 
     job_id = generate_timestamp()
     last_output_filename = None
-    history_pixels = None
     history_latents = None
+    history_pixels = None
     total_generated_latent_frames = 0
 
-    from diffusers_helper.memory import unload_complete_models
-
+    # 초기 메시지
     stream.output_queue.push(('progress', (None, '', make_progress_bar_html(0, 'Starting ...'))))
 
     try:
+        # VRAM 적을 경우, 미리 Unload
         if not high_vram and not cpu_fallback_mode:
             try:
-                unload_complete_models(
-                    text_encoder, text_encoder_2, image_encoder, vae, transformer
-                )
+                unload_complete_models(text_encoder, text_encoder_2, image_encoder, vae, transformer)
             except Exception as e:
                 print(f"Error unloading models: {e}")
 
-        # Text Encode
+        # (1) Text Encode
         last_update_time = time.time()
         stream.output_queue.push(('progress', (None, '', make_progress_bar_html(0, 'Text encoding...'))))
 
         try:
             if not high_vram and not cpu_fallback_mode:
+                # Dynamic 오프로딩
                 fake_diffusers_current_device(text_encoder, device)
                 load_model_as_complete(text_encoder_2, target_device=device)
 
             llama_vec, clip_l_pooler = encode_prompt_conds(
                 prompt, text_encoder, text_encoder_2, tokenizer, tokenizer_2
             )
-
             if cfg == 1:
                 llama_vec_n, clip_l_pooler_n = (
                     torch.zeros_like(llama_vec),
@@ -549,7 +561,6 @@ def worker(
                 llama_vec_n, clip_l_pooler_n = encode_prompt_conds(
                     n_prompt, text_encoder, text_encoder_2, tokenizer, tokenizer_2
                 )
-
             llama_vec, llama_attention_mask = crop_or_pad_yield_mask(llama_vec, length=512)
             llama_vec_n, llama_attention_mask_n = crop_or_pad_yield_mask(llama_vec_n, length=512)
         except Exception as e:
@@ -560,14 +571,16 @@ def worker(
             stream.output_queue.push(('end', None))
             return
 
-        # Image processing
+        # (2) Image processing
         last_update_time = time.time()
         stream.output_queue.push(('progress', (None, '', make_progress_bar_html(0, 'Image processing...'))))
 
         try:
             H, W, C = input_image.shape
+            # 해상도 버킷
             height, width = find_nearest_bucket(H, W, resolution=640)
 
+            # CPU 모드면 해상도 너무 크지 않게
             if cpu_fallback_mode:
                 height = min(height, 320)
                 width = min(width, 320)
@@ -585,7 +598,7 @@ def worker(
             stream.output_queue.push(('end', None))
             return
 
-        # VAE encoding
+        # (3) VAE Encoding
         last_update_time = time.time()
         stream.output_queue.push(('progress', (None, '', make_progress_bar_html(0, 'VAE encoding...'))))
 
@@ -601,16 +614,14 @@ def worker(
             stream.output_queue.push(('end', None))
             return
 
-        # CLIP Vision
+        # (4) CLIP Vision
         last_update_time = time.time()
         stream.output_queue.push(('progress', (None, '', make_progress_bar_html(0, 'CLIP Vision encode...'))))
 
         try:
             if not high_vram and not cpu_fallback_mode:
                 load_model_as_complete(image_encoder, target_device=device)
-            image_encoder_output = hf_clip_vision_encode(
-                input_image_np, feature_extractor, image_encoder
-            )
+            image_encoder_output = hf_clip_vision_encode(input_image_np, feature_extractor, image_encoder)
             image_encoder_last_hidden_state = image_encoder_output.last_hidden_state
         except Exception as e:
             err = f"CLIP Vision encode error: {e}"
@@ -620,7 +631,7 @@ def worker(
             stream.output_queue.push(('end', None))
             return
 
-        # Convert dtype
+        # (5) dtype 변환
         try:
             llama_vec = llama_vec.to(transformer.dtype)
             llama_vec_n = llama_vec_n.to(transformer.dtype)
@@ -635,20 +646,18 @@ def worker(
             stream.output_queue.push(('end', None))
             return
 
-        # Sampling
+        # (6) Sampling 반복
         last_update_time = time.time()
         stream.output_queue.push(('progress', (None, '', make_progress_bar_html(0, 'Start sampling...'))))
 
         rnd = torch.Generator("cpu").manual_seed(seed)
-        num_frames = latent_window_size * 4 - 3
 
+        # FramePack_F1 모델에서, 처음에는 history_latents = [start_latent] 정도
+        # 2번째 코드처럼, 우선 history_latents 에 start_latent 넣고, 섹션별로 확장
         try:
-            history_latents = torch.zeros(
-                size=(1, 16, 1 + 2 + 16, height // 8, width // 8),
-                dtype=torch.float32
-            ).cpu()
+            history_latents = start_latent.cpu()
             history_pixels = None
-            total_generated_latent_frames = 0
+            total_generated_latent_frames = start_latent.shape[2]  # 보통 1
         except Exception as e:
             err = f"Init history state error: {e}"
             print(err)
@@ -657,57 +666,27 @@ def worker(
             stream.output_queue.push(('end', None))
             return
 
-        latent_paddings = list(reversed(range(total_latent_sections)))
-        if total_latent_sections > 4:
-            # Some heuristic to flatten out large steps
-            latent_paddings = [3] + [2]*(total_latent_sections - 3) + [1, 0]
+        # mp4 CRF(품질) 등은 고정(16 등) 가능. 여기서는 간단히 CRF=16
+        mp4_crf = 16
 
-        for latent_padding in latent_paddings:
-            last_update_time = time.time()
-            is_last_section = (latent_padding == 0)
-            latent_padding_size = latent_padding * latent_window_size
-
+        for section_index in range(total_latent_sections):
             if stream.input_queue.top() == 'end':
-                # If user requests end, save partial video if possible
+                # 사용자 중단
                 if history_pixels is not None and total_generated_latent_frames > 0:
                     try:
                         outname = os.path.join(
                             outputs_folder, f'{job_id}_final_{total_generated_latent_frames}.mp4'
                         )
-                        save_bcthw_as_mp4(history_pixels, outname, fps=30)
+                        save_bcthw_as_mp4(history_pixels, outname, fps=30, crf=mp4_crf)
                         stream.output_queue.push(('file', outname))
                     except Exception as e:
                         print(f"Error saving final partial video: {e}")
                 stream.output_queue.push(('end', None))
                 return
 
-            print(f"latent_padding_size={latent_padding_size}, last_section={is_last_section}")
+            print(f"Section {section_index+1}/{total_latent_sections}")
 
-            try:
-                indices = torch.arange(
-                    0, sum([1, latent_padding_size, latent_window_size, 1, 2, 16])
-                ).unsqueeze(0)
-                (
-                    clean_latent_indices_pre,
-                    blank_indices,
-                    latent_indices,
-                    clean_latent_indices_post,
-                    clean_latent_2x_indices,
-                    clean_latent_4x_indices
-                ) = indices.split([1, latent_padding_size, latent_window_size, 1, 2, 16], dim=1)
-                clean_latent_indices = torch.cat([clean_latent_indices_pre, clean_latent_indices_post], dim=1)
-
-                clean_latents_pre = start_latent.to(history_latents)
-                clean_latents_post, clean_latents_2x, clean_latents_4x = history_latents[:, :, :1 + 2 + 16].split([1, 2, 16], dim=2)
-                clean_latents = torch.cat([clean_latents_pre, clean_latents_post], dim=2)
-            except Exception as e:
-                err = f"Sampling data prep error: {e}"
-                print(err)
-                traceback.print_exc()
-                if last_output_filename:
-                    stream.output_queue.push(('file', last_output_filename))
-                continue
-
+            # 모델 스왑
             if not high_vram and not cpu_fallback_mode:
                 try:
                     unload_complete_models()
@@ -726,6 +705,7 @@ def worker(
             else:
                 transformer.initialize_teacache(enable_teacache=False)
 
+            # 콜백
             def callback(d):
                 global last_update_time
                 last_update_time = time.time()
@@ -741,7 +721,7 @@ def worker(
                     curr_step = d['i'] + 1
                     percentage = int(100.0 * curr_step / steps)
                     hint = f'Sampling {curr_step}/{steps}'
-                    desc = f'Total frames so far: {int(max(0, total_generated_latent_frames * 4 - 3))}'
+                    desc = f'Section {section_index+1}/{total_latent_sections}'
                     barhtml = make_progress_bar_html(percentage, hint)
                     stream.output_queue.push(('progress', (preview, desc, barhtml)))
                 except KeyboardInterrupt:
@@ -750,113 +730,137 @@ def worker(
                     print(f"Callback error: {e}")
                 return
 
+            # 2번째 예시처럼 indices split
+            # FramePack_F1: [1, 16, 2, 1, latent_window_size] 방식
             try:
-                print(f"Sampling with device={device}, dtype={transformer.dtype}, teacache={use_teacache}")
-                from diffusers_helper.pipelines.k_diffusion_hunyuan import sample_hunyuan
+                # 한 번 샘플링할 프레임 수
+                frames_per_section = latent_window_size * 4 - 3
 
-                try:
-                    generated_latents = sample_hunyuan(
-                        transformer=transformer,
-                        sampler='unipc',
-                        width=width,
-                        height=height,
-                        frames=num_frames,
-                        real_guidance_scale=cfg,
-                        distilled_guidance_scale=gs,
-                        guidance_rescale=rs,
-                        num_inference_steps=steps,
-                        generator=rnd,
-                        prompt_embeds=llama_vec,
-                        prompt_embeds_mask=llama_attention_mask,
-                        prompt_poolers=clip_l_pooler,
-                        negative_prompt_embeds=llama_vec_n,
-                        negative_prompt_embeds_mask=llama_attention_mask_n,
-                        negative_prompt_poolers=clip_l_pooler_n,
-                        device=device,
-                        dtype=transformer.dtype,
-                        image_embeddings=image_encoder_last_hidden_state,
-                        latent_indices=latent_indices,
-                        clean_latents=clean_latents,
-                        clean_latent_indices=clean_latent_indices,
-                        clean_latents_2x=clean_latents_2x,
-                        clean_latent_2x_indices=clean_latent_2x_indices,
-                        clean_latents_4x=clean_latents_4x,
-                        clean_latent_4x_indices=clean_latent_4x_indices,
-                        callback=callback
-                    )
-                except KeyboardInterrupt as e:
-                    print(f"User interrupt: {e}")
-                    if last_output_filename:
-                        stream.output_queue.push(('file', last_output_filename))
-                        err = "User stopped generation, partial video returned."
-                    else:
-                        err = "User stopped generation, no video produced."
-                    stream.output_queue.push(('error', err))
-                    stream.output_queue.push(('end', None))
-                    return
+                # indices 준비
+                indices = torch.arange(0, sum([1, 16, 2, 1, latent_window_size])).unsqueeze(0)
+                (
+                    clean_latent_indices_start,
+                    clean_latent_4x_indices,
+                    clean_latent_2x_indices,
+                    clean_latent_1x_indices,
+                    latent_indices
+                ) = indices.split([1, 16, 2, 1, latent_window_size], dim=1)
+
+                # history_latents 에서 뒷부분 16+2+1=19 프레임짜리를 나눠서 clean_latents_xx 로 추출
+                if history_latents.shape[2] < 19:
+                    # 혹은 초기 상태라 19프레임이 없을 수도 있으므로 패딩
+                    # 여기서는 단순히 history_latents 전부를 19프레임으로 맞춰주기
+                    needed = 19 - history_latents.shape[2]
+                    if needed > 0:
+                        pad_shape = list(history_latents.shape)
+                        pad_shape[2] = needed
+                        pad_zeros = torch.zeros(pad_shape, dtype=history_latents.dtype)
+                        history_latents = torch.cat([pad_zeros, history_latents], dim=2)
+
+                clean_latents_4x, clean_latents_2x, clean_latents_1x = history_latents[:, :, -19:, :, :].split([16, 2, 1], dim=2)
+                # clean_latents 는 [start_latent + clean_latents_1x], 즉 1프레임 정도만 연결
+                clean_latents = torch.cat([start_latent.to(history_latents), clean_latents_1x], dim=2)
             except Exception as e:
-                print(f"Sampling error: {e}")
+                err = f"Indices prep error: {e}"
+                print(err)
                 traceback.print_exc()
-                if last_output_filename:
-                    stream.output_queue.push(('file', last_output_filename))
-                    err = f"Error during sampling, partial video returned: {e}"
-                    stream.output_queue.push(('error', err))
-                else:
-                    err = f"Error during sampling, no video produced: {e}"
-                    stream.output_queue.push(('error', err))
+                stream.output_queue.push(('error', err))
                 stream.output_queue.push(('end', None))
                 return
 
+            # 진짜 샘플링
             try:
-                if is_last_section:
-                    generated_latents = torch.cat([start_latent.to(generated_latents), generated_latents], dim=2)
-                total_generated_latent_frames += int(generated_latents.shape[2])
-                history_latents = torch.cat([generated_latents.to(history_latents), history_latents], dim=2)
-            except Exception as e:
-                err = f"Post-latent processing error: {e}"
-                print(err)
-                traceback.print_exc()
+                generated_latents = sample_hunyuan(
+                    transformer=transformer,
+                    sampler='unipc',
+                    width=width,
+                    height=height,
+                    frames=frames_per_section,
+                    real_guidance_scale=cfg,
+                    distilled_guidance_scale=gs,
+                    guidance_rescale=rs,
+                    num_inference_steps=steps,
+                    generator=rnd,
+                    prompt_embeds=llama_vec,
+                    prompt_embeds_mask=llama_attention_mask,
+                    prompt_poolers=clip_l_pooler,
+                    negative_prompt_embeds=llama_vec_n,
+                    negative_prompt_embeds_mask=llama_attention_mask_n,
+                    negative_prompt_poolers=clip_l_pooler_n,
+                    device=device,
+                    dtype=transformer.dtype,
+                    image_embeddings=image_encoder_last_hidden_state,
+                    latent_indices=latent_indices,
+                    clean_latents=clean_latents,
+                    clean_latent_indices=torch.cat([clean_latent_indices_start, clean_latent_1x_indices], dim=1),
+                    clean_latents_2x=clean_latents_2x,
+                    clean_latent_2x_indices=clean_latent_2x_indices,
+                    clean_latents_4x=clean_latents_4x,
+                    clean_latent_4x_indices=clean_latent_4x_indices,
+                    callback=callback
+                )
+            except KeyboardInterrupt:
+                print("User stopped generation.")
+                err = "User stopped generation, partial video returned."
                 if last_output_filename:
                     stream.output_queue.push(('file', last_output_filename))
                 stream.output_queue.push(('error', err))
                 stream.output_queue.push(('end', None))
                 return
+            except Exception as e:
+                print(f"Sampling error: {e}")
+                traceback.print_exc()
+                if last_output_filename:
+                    err = f"Error during sampling, partial video returned: {e}"
+                    stream.output_queue.push(('file', last_output_filename))
+                    stream.output_queue.push(('error', err))
+                else:
+                    err = f"Error during sampling: {e}"
+                    stream.output_queue.push(('error', err))
+                stream.output_queue.push(('end', None))
+                return
 
+            try:
+                # history_latents 뒤에 붙이기
+                total_generated_latent_frames += generated_latents.shape[2]
+                history_latents = torch.cat([history_latents, generated_latents.to(history_latents)], dim=2)
+            except Exception as e:
+                err = f"Concat history_latents error: {e}"
+                print(err)
+                traceback.print_exc()
+                stream.output_queue.push(('error', err))
+                stream.output_queue.push(('end', None))
+                return
+
+            # 모델 오프로딩 / VAE 로드
             if not high_vram and not cpu_fallback_mode:
                 try:
-                    offload_model_from_device_for_memory_preservation(
-                        transformer, target_device=device, preserved_memory_gb=8
-                    )
+                    offload_model_from_device_for_memory_preservation(transformer, target_device=device, preserved_memory_gb=8)
                     load_model_as_complete(vae, target_device=device)
                 except Exception as e:
                     print(f"Model memory manage error: {e}")
 
+            # VAE 디코드 & 결과 저장
             try:
-                real_history_latents = history_latents[:, :, :total_generated_latent_frames]
-            except Exception as e:
-                err = f"History latents slice error: {e}"
-                print(err)
-                if last_output_filename:
-                    stream.output_queue.push(('file', last_output_filename))
-                continue
+                real_history_latents = history_latents  # 모든 프레임
 
-            try:
-                # VAE decode
+                # 처음 디코드 시
                 if history_pixels is None:
                     history_pixels = vae_decode(real_history_latents, vae).cpu()
                 else:
-                    # Overlap logic
-                    section_latent_frames = (
-                        (latent_window_size * 2 + 1) if is_last_section else (latent_window_size * 2)
-                    )
-                    overlapped_frames = latent_window_size * 4 - 3
-                    current_pixels = vae_decode(real_history_latents[:, :, :section_latent_frames], vae).cpu()
-                    history_pixels = soft_append_bcthw(current_pixels, history_pixels, overlapped_frames)
-                
+                    # 앞뒤 중복 프레임 연결(단순 Append).  
+                    # 여기서는 2번째 예시의 soft_append_bcthw 방식을 그대로 사용
+                    # frames_per_section = latent_window_size*4 - 3
+                    # 중복(overlapped_frames)도 동일: frames_per_section
+                    # 다만, 실제론 첫 섹션엔 중복이 거의 없을 수 있으므로 안전하게 min처리
+                    overlapped_frames = frames_per_section
+                    current_pixels = vae_decode(real_history_latents[:, :, -frames_per_section:], vae).cpu()
+                    history_pixels = soft_append_bcthw(history_pixels, current_pixels, overlapped_frames)
+
                 output_filename = os.path.join(
                     outputs_folder, f'{job_id}_{total_generated_latent_frames}.mp4'
                 )
-                save_bcthw_as_mp4(history_pixels, output_filename, fps=30)
+                save_bcthw_as_mp4(history_pixels, output_filename, fps=30, crf=mp4_crf)
                 last_output_filename = output_filename
                 stream.output_queue.push(('file', output_filename))
             except Exception as e:
@@ -868,16 +872,13 @@ def worker(
                 stream.output_queue.push(('error', err))
                 continue
 
-            if is_last_section:
-                break
+        # for문 종료
     except Exception as e:
         print(f"Outer error: {e}, type={type(e)}")
         traceback.print_exc()
         if not high_vram and not cpu_fallback_mode:
             try:
-                unload_complete_models(
-                    text_encoder, text_encoder_2, image_encoder, vae, transformer
-                )
+                unload_complete_models(text_encoder, text_encoder_2, image_encoder, vae, transformer)
             except Exception as ue:
                 print(f"Unload error: {ue}")
 
@@ -889,7 +890,8 @@ def worker(
     print("Worker finished, pushing 'end'.")
     stream.output_queue.push(('end', None))
 
-# 최종 처리 함수 (Spaces GPU decorator or normal)
+
+# Gradio 내에서 Spaces GPU를 쓰는지 여부에 따라 process 함수를 감싸는 로직
 if IN_HF_SPACE and 'spaces' in globals():
     @spaces.GPU
     def process_with_gpu(
@@ -900,7 +902,7 @@ if IN_HF_SPACE and 'spaces' in globals():
         global stream
         assert input_image is not None, "No input image given."
 
-        # Initialize UI state
+        # 초기화
         yield None, None, "", "", gr.update(interactive=False), gr.update(interactive=True)
         try:
             stream = AsyncStream()
@@ -916,50 +918,35 @@ if IN_HF_SPACE and 'spaces' in globals():
             error_message = None
 
             while True:
-                try:
-                    flag, data = stream.output_queue.next()
-                    if flag == 'file':
-                        output_filename = data
-                        prev_output_filename = output_filename
-                        yield output_filename, gr.update(), gr.update(), '', gr.update(interactive=False), gr.update(interactive=True)
-                    elif flag == 'progress':
-                        preview, desc, html = data
-                        yield gr.update(), gr.update(visible=True, value=preview), desc, html, gr.update(interactive=False), gr.update(interactive=True)
-                    elif flag == 'error':
-                        error_message = data
-                        print(f"Got error: {error_message}")
-                    elif flag == 'end':
-                        if output_filename is None and prev_output_filename:
-                            output_filename = prev_output_filename
-                        if error_message:
-                            err_html = create_error_html(error_message)
-                            yield (
-                                output_filename, gr.update(visible=False), gr.update(),
-                                err_html, gr.update(interactive=True), gr.update(interactive=False)
-                            )
-                        else:
-                            yield (
-                                output_filename, gr.update(visible=False), gr.update(),
-                                '', gr.update(interactive=True), gr.update(interactive=False)
-                            )
-                        break
-                except Exception as e:
-                    print(f"Loop error: {e}")
-                    if (time.time() - last_update_time) > 60:
-                        print("No updates for 60 seconds, possible hang or timeout.")
-                        if prev_output_filename:
-                            err_html = create_error_html("partial video has been generated", is_timeout=True)
-                            yield (
-                                prev_output_filename, gr.update(visible=False), gr.update(),
-                                err_html, gr.update(interactive=True), gr.update(interactive=False)
-                            )
-                        else:
-                            err_html = create_error_html(f"Processing timed out: {e}", is_timeout=True)
-                            yield (
-                                None, gr.update(visible=False), gr.update(),
-                                err_html, gr.update(interactive=True), gr.update(interactive=False)
-                            )
-                        break
+                flag, data = stream.output_queue.next()
+                if flag == 'file':
+                    output_filename = data
+                    prev_output_filename = output_filename
+                    yield output_filename, gr.update(), gr.update(), '', gr.update(interactive=False), gr.update(interactive=True)
+
+                elif flag == 'progress':
+                    preview, desc, html = data
+                    yield gr.update(), gr.update(visible=True, value=preview), desc, html, gr.update(interactive=False), gr.update(interactive=True)
+
+                elif flag == 'error':
+                    error_message = data
+                    print(f"Got error: {error_message}")
+
+                elif flag == 'end':
+                    if output_filename is None and prev_output_filename:
+                        output_filename = prev_output_filename
+                    if error_message:
+                        err_html = create_error_html(error_message)
+                        yield (
+                            output_filename, gr.update(visible=False), gr.update(),
+                            err_html, gr.update(interactive=True), gr.update(interactive=False)
+                        )
+                    else:
+                        yield (
+                            output_filename, gr.update(visible=False), gr.update(),
+                            '', gr.update(interactive=True), gr.update(interactive=False)
+                        )
+                    break
         except Exception as e:
             print(f"Start process error: {e}")
             traceback.print_exc()
@@ -991,55 +978,41 @@ else:
             error_message = None
 
             while True:
-                try:
-                    flag, data = stream.output_queue.next()
-                    if flag == 'file':
-                        output_filename = data
-                        prev_output_filename = output_filename
-                        yield output_filename, gr.update(), gr.update(), '', gr.update(interactive=False), gr.update(interactive=True)
-                    elif flag == 'progress':
-                        preview, desc, html = data
-                        yield gr.update(), gr.update(visible=True, value=preview), desc, html, gr.update(interactive=False), gr.update(interactive=True)
-                    elif flag == 'error':
-                        error_message = data
-                        print(f"Got error: {error_message}")
-                    elif flag == 'end':
-                        if output_filename is None and prev_output_filename:
-                            output_filename = prev_output_filename
-                        if error_message:
-                            err_html = create_error_html(error_message)
-                            yield (
-                                output_filename, gr.update(visible=False), gr.update(),
-                                err_html, gr.update(interactive=True), gr.update(interactive=False)
-                            )
-                        else:
-                            yield (
-                                output_filename, gr.update(visible=False), gr.update(),
-                                '', gr.update(interactive=True), gr.update(interactive=False)
-                            )
-                        break
-                except Exception as e:
-                    print(f"Loop error: {e}")
-                    if (time.time() - last_update_time) > 60:
-                        print("No update for 60 seconds, possible hang or timeout.")
-                        if prev_output_filename:
-                            err_html = create_error_html("partial video has been generated", is_timeout=True)
-                            yield (
-                                prev_output_filename, gr.update(visible=False), gr.update(),
-                                err_html, gr.update(interactive=True), gr.update(interactive=False)
-                            )
-                        else:
-                            err_html = create_error_html(f"Processing timed out: {e}", is_timeout=True)
-                            yield (
-                                None, gr.update(visible=False), gr.update(),
-                                err_html, gr.update(interactive=True), gr.update(interactive=False)
-                            )
-                        break
+                flag, data = stream.output_queue.next()
+                if flag == 'file':
+                    output_filename = data
+                    prev_output_filename = output_filename
+                    yield output_filename, gr.update(), gr.update(), '', gr.update(interactive=False), gr.update(interactive=True)
+
+                elif flag == 'progress':
+                    preview, desc, html = data
+                    yield gr.update(), gr.update(visible=True, value=preview), desc, html, gr.update(interactive=False), gr.update(interactive=True)
+
+                elif flag == 'error':
+                    error_message = data
+                    print(f"Got error: {error_message}")
+
+                elif flag == 'end':
+                    if output_filename is None and prev_output_filename:
+                        output_filename = prev_output_filename
+                    if error_message:
+                        err_html = create_error_html(error_message)
+                        yield (
+                            output_filename, gr.update(visible=False), gr.update(),
+                            err_html, gr.update(interactive=True), gr.update(interactive=False)
+                        )
+                    else:
+                        yield (
+                            output_filename, gr.update(visible=False), gr.update(),
+                            '', gr.update(interactive=True), gr.update(interactive=False)
+                        )
+                    break
         except Exception as e:
             print(f"Start process error: {e}")
             traceback.print_exc()
             err_html = create_error_html(str(e))
             yield None, gr.update(visible=False), gr.update(), err_html, gr.update(interactive=True), gr.update(interactive=False)
+
 
 def end_process():
     """
@@ -1068,7 +1041,6 @@ quick_prompts = [
     ["A character doing some simple body movements."]
 ]
 
-# CSS (파스텔 톤 스타일)
 def make_custom_css():
     base_progress_css = make_progress_bar_css()
     pastel_css = """
@@ -1169,17 +1141,17 @@ with block:
     with gr.Row(elem_classes="mobile-full-width"):
         with gr.Column(scale=1, elem_classes="gr-panel"):
             input_image = gr.Image(
-                label="Upload Image",
+                label=get_translation("upload_image"),
                 sources='upload',
                 type="numpy",
                 elem_id="input-image",
                 height=320
             )
-            prompt = gr.Textbox(label="Prompt", value='', elem_id="prompt-input")
+            prompt = gr.Textbox(label=get_translation("prompt"), value='', elem_id="prompt-input")
 
             example_quick_prompts = gr.Dataset(
                 samples=quick_prompts,
-                label="Quick Prompts",
+                label=get_translation("quick_prompts"),
                 samples_per_page=1000,
                 components=[prompt]
             )
@@ -1193,18 +1165,18 @@ with block:
         with gr.Column(scale=1, elem_classes="gr-panel"):
             with gr.Row(elem_classes="button-container"):
                 start_button = gr.Button(
-                    value="Generate",
+                    value=get_translation("start_generation"),
                     elem_id="start-button",
                     variant="primary"
                 )
                 end_button = gr.Button(
-                    value="Stop",
+                    value=get_translation("stop_generation"),
                     elem_id="stop-button",
                     interactive=False
                 )
             
             result_video = gr.Video(
-                label="Generated Video",
+                label=get_translation("generated_video"),
                 autoplay=True,
                 loop=True,
                 height=320,
@@ -1212,7 +1184,7 @@ with block:
                 elem_id="result-video"
             )
             preview_image = gr.Image(
-                label="Preview",
+                label=get_translation("next_latents"),
                 visible=False,
                 height=150,
                 elem_classes="preview-container"
@@ -1239,11 +1211,11 @@ with block:
             value=31337,
             precision=0
         )
-        # 여기서 기본값(value)을 2로 변경 (최대 5는 그대로 유지)
+        # 기본값(value) = 2, 최대값(maximum) = 4
         total_second_length = gr.Slider(
             label=get_translation("video_length"),
             minimum=1,
-            maximum=5,
+            maximum=4,
             value=2,
             step=0.1
         )
@@ -1296,7 +1268,7 @@ with block:
             info=get_translation("gpu_memory_info")
         )
 
-    # 처리 함수 연결
+    # 버튼 동작
     ips = [
         input_image, prompt, n_prompt, seed,
         total_second_length, latent_window_size, steps,
