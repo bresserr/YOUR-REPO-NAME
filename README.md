@@ -7,7 +7,7 @@ sdk: gradio
 sdk_version:  5.29.0
 app_file: app.py
 pinned: false
-short_description: NSFW Uncensored image to video for AI Limits
+short_description: MAX ~60sec Video - AI Limits
 models:
   - Heartsync/NSFW-Uncensored
 ---
