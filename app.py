@@ -1,4 +1,5 @@
 import os
+import sys
 
 os.environ['HF_HOME'] = os.path.abspath(
     os.path.realpath(os.path.join(os.path.dirname(__file__), './hf_download'))
