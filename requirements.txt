@@ -17,3 +17,4 @@ safetensors
 huggingface_hub
 spaces
 cohere
+gradio
