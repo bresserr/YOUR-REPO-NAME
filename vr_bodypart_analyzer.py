@@ -77,30 +77,38 @@ def load_detector(engine_path: Path = Path("models/body_parts.engine")):
     context, stream, bindings)* that can be directly passed to
     :func:`run_inference`.
     """
-    if not engine_path.exists():
-        print("[INFO] TensorRT engine not found – falling back to mock detections.")
+    try:
+        if not engine_path.exists():
+            print("[INFO] TensorRT engine not found – falling back to mock detections.")
+            return None
+        if trt is None:
+            print("[WARN] Module 'tensorrt' not installed. Install NVIDIA's TensorRT Python wheel. Using mock detections.")
+            return None
+        if cuda is None:
+            print("[WARN] Module 'pycuda' not installed or CUDA toolkit missing.  Running in CPU-only fallback mode.")
+            return None
+
+        TRT_LOGGER = trt.Logger(trt.Logger.WARNING)
+        runtime = trt.Runtime(TRT_LOGGER)
+        with engine_path.open("rb") as f:
+            engine = runtime.deserialize_cuda_engine(f.read())
+        context = engine.create_execution_context()
+
+        # Allocate buffers
+        h_input = cuda.pagelocked_empty(trt.volume(engine.get_binding_shape(0)), dtype=np.float32)
+        h_output = cuda.pagelocked_empty(trt.volume(engine.get_binding_shape(1)), dtype=np.float32)
+        d_input = cuda.mem_alloc(h_input.nbytes)
+        d_output = cuda.mem_alloc(h_output.nbytes)
+        bindings = [int(d_input), int(d_output)]
+        stream = cuda.Stream()
+
+        print(f"[INFO] TensorRT engine loaded from {engine_path}")
+        return engine, context, stream, (h_input, h_output, d_input, d_output, bindings)
+
+    except Exception as exc:
+        # Any error in TensorRT initialisation should not crash the app
+        print(f"[ERROR] Failed to initialise TensorRT engine – continuing with CPU mock. Details: {exc}")
         return None
-    if trt is None or cuda is None:
-        print("[WARN] TensorRT or PyCUDA unavailable – using mocked detections.")
-        return None
-
-    TRT_LOGGER = trt.Logger(trt.Logger.WARNING)
-    runtime = trt.Runtime(TRT_LOGGER)
-    with engine_path.open("rb") as f:
-        engine = runtime.deserialize_cuda_engine(f.read())
-    context = engine.create_execution_context()
-
-    # Allocate host/device buffers *once* – we assume exactly one input and one
-    # output binding (adjust if your model differs)
-    h_input = cuda.pagelocked_empty(trt.volume(engine.get_binding_shape(0)), dtype=np.float32)
-    h_output = cuda.pagelocked_empty(trt.volume(engine.get_binding_shape(1)), dtype=np.float32)
-    d_input = cuda.mem_alloc(h_input.nbytes)
-    d_output = cuda.mem_alloc(h_output.nbytes)
-    bindings = [int(d_input), int(d_output)]
-    stream = cuda.Stream()
-
-    print(f"[INFO] TensorRT engine loaded from {engine_path}")
-    return engine, context, stream, (h_input, h_output, d_input, d_output, bindings)
 
 
 # NEW: minimal inference helper – replace with your own post-processing
@@ -114,7 +122,8 @@ def run_inference(detector_tuple, frame: np.ndarray) -> DetectionResult:
     self-contained while still exercising the GPU pipeline.
     """
     if detector_tuple is None:
-        raise ValueError("Detector tuple must not be None for real inference.")
+        # Should never be called in this case but guard anyway
+        return {}
 
     engine, context, stream, (h_in, h_out, d_in, d_out, bindings) = detector_tuple
 
@@ -125,10 +134,15 @@ def run_inference(detector_tuple, frame: np.ndarray) -> DetectionResult:
     np.copyto(h_in, rgb)
 
     # --- GPU execution ------------------------------------------------------
-    cuda.memcpy_htod_async(d_in, h_in, stream)
-    context.execute_async_v2(bindings=bindings, stream_handle=stream.handle)
-    cuda.memcpy_dtoh_async(h_out, d_out, stream)
-    stream.synchronize()
+    try:
+        # --- pre-process / copy etc. (unchanged) ...
+        cuda.memcpy_htod_async(d_in, h_in, stream)
+        context.execute_async_v2(bindings=bindings, stream_handle=stream.handle)
+        cuda.memcpy_dtoh_async(h_out, d_out, stream)
+        stream.synchronize()
+    except Exception as exc:
+        print(f"[ERROR] TensorRT inference failed – switching to mock detections. Details: {exc}")
+        return detect_body_parts(None, frame)
 
     # --- very minimal, fake post-processing ---------------------------------
     # For demo purposes we convert the raw GPU output into the same kind of
@@ -394,54 +408,78 @@ class VideoSession:
 # --------------------------------------------------------------------------------------
 
 
-def analyse_interactions(traj_boxes: List[DetectionResult], traj_depth: List[DepthMap], fps: float) -> List[Dict[str, int]]:
-    """Produce advanced Handy *.funscript* actions using speed & depth.
+CONTACT_PARTS = [p for p in BODY_PARTS if p not in ("penis",)]
 
-    *pos* encodes penetration depth (derived from stereo disparity) while rapid
-    changes generate denser action points to reflect higher speed.
+
+def _iou(boxA: BoundingBox, boxB: BoundingBox) -> float:
+    """Intersection-over-Union of two boxes."""
+    xA = max(boxA[0], boxB[0])
+    yA = max(boxA[1], boxB[1])
+    xB = min(boxA[2], boxB[2])
+    yB = min(boxA[3], boxB[3])
+    inter_w = max(0, xB - xA)
+    inter_h = max(0, yB - yA)
+    inter = inter_w * inter_h
+    if inter == 0:
+        return 0.0
+    boxA_area = (boxA[2] - boxA[0]) * (boxA[3] - boxA[1])
+    boxB_area = (boxB[2] - boxB[0]) * (boxB[3] - boxB[1])
+    return inter / float(boxA_area + boxB_area - inter + 1e-6)
+
+
+def analyse_interactions(traj_boxes: List[DetectionResult], traj_depth: List[DepthMap], fps: float) -> List[Dict[str, int]]:
+    """Generate funscript using depth, speed and contact with other body parts.
+
+    Additional logic:
+    • If penis overlaps (IoU>0.05) with mouth/vagina increase *pos* sharply (simulate thrust).
+    • If hands overlap, dampen strokes (simulate grip) by reducing *pos* change.
     """
     if not traj_boxes:
         return []
 
     actions: List[Dict[str, int]] = []
     prev_pos = None
-    prev_time = 0
 
-    # compute max depth to normalise
-    max_depth = max((depth.get("penis", 0.0) for depth in traj_depth), default=1.0)
-    max_depth = max(max_depth, 1e-3)
+    max_depth = max((depth.get("penis", 0.0) for depth in traj_depth), default=1.0) or 1e-3
 
     for idx, (boxes, depth) in enumerate(zip(traj_boxes, traj_depth)):
         if "penis" not in boxes:
             continue
 
-        # depth-based position (0-100)
-        depth_norm = depth.get("penis", 0.0) / max_depth
-        pos = int(max(0, min(100, depth_norm * 100)))
+        base_depth_norm = depth.get("penis", 0.0) / max_depth
+        pos = base_depth_norm * 100
 
-        # speed calculation – vertical movement on screen
-        _, y1, _, y2 = boxes["penis"]
-        cy = (y1 + y2) / 2.0
-        if idx > 0 and "penis" in traj_boxes[idx - 1]:
-            _, py1, _, py2 = traj_boxes[idx - 1]["penis"]
-            pcy = (py1 + py2) / 2.0
-            speed_px_per_s = abs(cy - pcy) * fps
-            # Insert extra action points for very high speed to replicate strokes
-            if speed_px_per_s > 100:  # heuristic threshold
-                mid_time = int((idx - 0.5) * (1000 / fps))
-                mid_pos = (pos + (prev_pos if prev_pos is not None else pos)) // 2
-                if prev_pos != mid_pos:
-                    actions.append({"at": mid_time, "pos": mid_pos})
+        # Check contacts
+        penis_box = boxes["penis"]
+        contact_boost = 0
+        for part in CONTACT_PARTS:
+            if part in boxes:
+                iou = _iou(penis_box, boxes[part])
+                if iou > 0.05:
+                    if part in ("vagina", "mouth"):
+                        contact_boost = max(contact_boost, 20)  # deep thrust
+                    elif part.startswith("hand"):
+                        contact_boost = max(contact_boost, -10)  # grip slows stroke
+
+        pos = max(0, min(100, int(pos + contact_boost)))
+
+        # Speed injection (as before)
+        if idx and "penis" in traj_boxes[idx - 1]:
+            _, y1_prev, _, y2_prev = traj_boxes[idx - 1]["penis"]
+            pcy_prev = (y1_prev + y2_prev) / 2.0
+            _, y1, _, y2 = penis_box
+            pcy = (y1 + y2) / 2.0
+            speed_px_per_s = abs(pcy - pcy_prev) * fps
+            if speed_px_per_s > 120:
+                # extra mid-stroke point
+                timestamp_mid = int((idx - 0.5) * (1000 / fps))
+                mid_pos = (prev_pos if prev_pos is not None else pos + pos) // 2
+                actions.append({"at": timestamp_mid, "pos": mid_pos})
 
         timestamp = int(idx * (1000 / fps))
         if pos != prev_pos:
             actions.append({"at": timestamp, "pos": pos})
             prev_pos = pos
-            prev_time = timestamp
-
-    # Ensure last action at end
-    if actions and actions[-1]["at"] != prev_time:
-        actions.append({"at": prev_time, "pos": prev_pos or 0})
 
     return actions
 
