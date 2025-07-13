@@ -1,0 +1,26 @@
+# VR Assistive Technology Application Requirements
+fastapi==0.104.1
+uvicorn==0.24.0
+websockets==12.0
+opencv-python==4.8.1.78
+mediapipe==0.10.5
+torch>=2.0.0
+torchvision
+torchaudio
+tensorrt==8.6.1
+pycuda==2022.2.2
+numpy==1.24.3
+scipy==1.11.4
+Pillow==10.0.1
+jinja2==3.1.2
+aiofiles==23.2.1
+python-multipart==0.0.6
+pydantic==2.5.0
+matplotlib==3.7.2
+scikit-image==0.21.0
+transformers==4.35.2
+onnxruntime-gpu==1.16.3
+onnx==1.15.0
+detectron2 @ git+https://github.com/facebookresearch/detectron2.git
+ultralytics==8.0.196
+supervision==0.15.0

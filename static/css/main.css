@@ -1,0 +1,436 @@
+/* VR Assistive Technology - Main Stylesheet */
+
+/* Global Styles */
+body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', sans-serif;
+    background-color: #f8f9fa;
+}
+
+.card {
+    border: none;
+    box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+    border-radius: 8px;
+}
+
+.card-header {
+    background-color: #fff;
+    border-bottom: 1px solid #e9ecef;
+    font-weight: 600;
+}
+
+/* Status Bar */
+#statusBar {
+    border-radius: 8px;
+    border: none;
+    box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+}
+
+#statusBar.alert-success {
+    background-color: #d4edda;
+    color: #155724;
+}
+
+#statusBar.alert-warning {
+    background-color: #fff3cd;
+    color: #856404;
+}
+
+#statusBar.alert-danger {
+    background-color: #f8d7da;
+    color: #721c24;
+}
+
+/* Control Panel */
+.form-check-group {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.form-check-label {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    cursor: pointer;
+}
+
+.color-indicator {
+    width: 12px;
+    height: 12px;
+    border-radius: 50%;
+    display: inline-block;
+}
+
+.form-range {
+    margin-bottom: 4px;
+}
+
+.form-range::-webkit-slider-thumb {
+    background-color: #007bff;
+}
+
+.form-range::-moz-range-thumb {
+    background-color: #007bff;
+    border: none;
+}
+
+/* Video Container */
+.video-container {
+    position: relative;
+    width: 100%;
+    height: 400px;
+    background-color: #000;
+    border-radius: 8px;
+    overflow: hidden;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.video-canvas {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    object-fit: contain;
+    cursor: crosshair;
+}
+
+.video-overlay {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    pointer-events: none;
+    z-index: 10;
+}
+
+.video-placeholder {
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    text-align: center;
+    z-index: 5;
+}
+
+/* Tracking Points */
+.tracking-point {
+    position: absolute;
+    width: 12px;
+    height: 12px;
+    border-radius: 50%;
+    border: 2px solid #fff;
+    box-shadow: 0 0 4px rgba(0,0,0,0.5);
+    cursor: pointer;
+    transform: translate(-50%, -50%);
+    z-index: 20;
+}
+
+.tracking-point.head {
+    background-color: #dc3545;
+}
+
+.tracking-point.mouth {
+    background-color: #ffc107;
+}
+
+.tracking-point.hand_1 {
+    background-color: #28a745;
+}
+
+.tracking-point.hand_2 {
+    background-color: #17a2b8;
+}
+
+.tracking-point.breasts {
+    background-color: #007bff;
+}
+
+.tracking-point.pelvis {
+    background-color: #6c757d;
+}
+
+.tracking-point.genitals {
+    background-color: #343a40;
+}
+
+.tracking-point.corrected {
+    border-color: #ffc107;
+    border-width: 3px;
+}
+
+.tracking-point:hover {
+    transform: translate(-50%, -50%) scale(1.2);
+}
+
+/* Timeline */
+.timeline-container {
+    width: 100%;
+}
+
+.timeline {
+    position: relative;
+    height: 8px;
+    background-color: #e9ecef;
+    border-radius: 4px;
+    cursor: pointer;
+    margin-bottom: 8px;
+}
+
+.timeline-progress {
+    height: 100%;
+    background-color: #007bff;
+    border-radius: 4px;
+    transition: width 0.1s ease;
+}
+
+.timeline-handle {
+    position: absolute;
+    top: 50%;
+    transform: translateY(-50%);
+    width: 16px;
+    height: 16px;
+    background-color: #007bff;
+    border: 2px solid #fff;
+    border-radius: 50%;
+    cursor: grab;
+    box-shadow: 0 2px 4px rgba(0,0,0,0.2);
+}
+
+.timeline-handle:active {
+    cursor: grabbing;
+}
+
+.timeline-info {
+    font-size: 12px;
+}
+
+/* Metrics */
+.metric-card {
+    text-align: center;
+    padding: 16px;
+    background-color: #f8f9fa;
+    border-radius: 8px;
+    margin-bottom: 16px;
+}
+
+.metric-label {
+    font-size: 12px;
+    font-weight: 600;
+    color: #6c757d;
+    text-transform: uppercase;
+    margin-bottom: 8px;
+}
+
+.metric-value {
+    font-size: 24px;
+    font-weight: bold;
+    color: #343a40;
+    margin-bottom: 8px;
+}
+
+.metric-bar {
+    height: 4px;
+    background-color: #e9ecef;
+    border-radius: 2px;
+    overflow: hidden;
+}
+
+.metric-bar-fill {
+    height: 100%;
+    background-color: #007bff;
+    transition: width 0.3s ease;
+    border-radius: 2px;
+}
+
+/* Interaction Lines */
+.interaction-line {
+    position: absolute;
+    stroke: #ffc107;
+    stroke-width: 2;
+    stroke-dasharray: 5,5;
+    opacity: 0.7;
+    z-index: 15;
+}
+
+.interaction-line.active {
+    stroke: #28a745;
+    stroke-width: 3;
+    opacity: 1;
+}
+
+/* Zoom Controls */
+.video-container.zoomed-in {
+    overflow: auto;
+}
+
+.video-canvas.zoomed {
+    width: 150%;
+    height: 150%;
+    cursor: move;
+}
+
+/* Loading Spinner */
+.loading-spinner {
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    z-index: 100;
+}
+
+.spinner-border {
+    width: 3rem;
+    height: 3rem;
+}
+
+/* Correction Mode */
+.correction-mode .video-canvas {
+    cursor: crosshair;
+}
+
+.correction-mode .tracking-point {
+    cursor: pointer;
+}
+
+.correction-crosshair {
+    position: absolute;
+    width: 20px;
+    height: 20px;
+    border: 2px solid #ffc107;
+    border-radius: 50%;
+    transform: translate(-50%, -50%);
+    pointer-events: none;
+    z-index: 25;
+}
+
+.correction-crosshair::before,
+.correction-crosshair::after {
+    content: '';
+    position: absolute;
+    background-color: #ffc107;
+}
+
+.correction-crosshair::before {
+    width: 2px;
+    height: 40px;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+}
+
+.correction-crosshair::after {
+    width: 40px;
+    height: 2px;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+}
+
+/* Responsive Design */
+@media (max-width: 768px) {
+    .video-container {
+        height: 300px;
+    }
+    
+    .metric-card {
+        margin-bottom: 8px;
+    }
+    
+    .metric-value {
+        font-size: 18px;
+    }
+    
+    .btn-group {
+        flex-direction: column;
+    }
+    
+    .btn-group .btn {
+        border-radius: 4px !important;
+        margin-bottom: 4px;
+    }
+    
+    .timeline-handle {
+        width: 20px;
+        height: 20px;
+    }
+}
+
+/* Accessibility */
+.sr-only {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
+    border: 0;
+}
+
+/* Focus styles for better accessibility */
+.btn:focus,
+.form-control:focus,
+.form-check-input:focus,
+.form-range:focus {
+    outline: 2px solid #007bff;
+    outline-offset: 2px;
+}
+
+/* High contrast mode support */
+@media (prefers-contrast: high) {
+    .tracking-point {
+        border-width: 3px;
+    }
+    
+    .metric-bar-fill {
+        background-color: #000;
+    }
+    
+    .timeline-progress {
+        background-color: #000;
+    }
+}
+
+/* Reduced motion support */
+@media (prefers-reduced-motion: reduce) {
+    .timeline-progress,
+    .metric-bar-fill,
+    .tracking-point {
+        transition: none;
+    }
+}
+
+/* Animation keyframes */
+@keyframes pulse {
+    0% {
+        transform: translate(-50%, -50%) scale(1);
+    }
+    50% {
+        transform: translate(-50%, -50%) scale(1.1);
+    }
+    100% {
+        transform: translate(-50%, -50%) scale(1);
+    }
+}
+
+.tracking-point.active {
+    animation: pulse 1s infinite;
+}
+
+/* Tooltip styles */
+.tooltip {
+    position: absolute;
+    background-color: rgba(0, 0, 0, 0.8);
+    color: white;
+    padding: 4px 8px;
+    border-radius: 4px;
+    font-size: 12px;
+    pointer-events: none;
+    z-index: 30;
+    white-space: nowrap;
+}
