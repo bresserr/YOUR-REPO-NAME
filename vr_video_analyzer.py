@@ -8,6 +8,7 @@ import cv2
 import torch
 import gradio as gr
 import mediapipe as mp
+import argparse
 from typing import Dict, List, Tuple, Optional, Any
 from dataclasses import dataclass
 from pathlib import Path
@@ -430,6 +431,122 @@ class VRVideoAnalyzer:
             debug=True
         )
 
-if __name__ == "__main__":
+def main():
+    """Main entry point with command line argument support"""
+    parser = argparse.ArgumentParser(
+        description="VR Video Analyzer - Analyze VR videos and generate funscripts"
+    )
+    
+    parser.add_argument(
+        "--share",
+        action="store_true",
+        help="Create a public shareable link"
+    )
+    
+    parser.add_argument(
+        "--server-name",
+        default="0.0.0.0",
+        help="Server hostname (default: 0.0.0.0)"
+    )
+    
+    parser.add_argument(
+        "--server-port",
+        type=int,
+        default=7860,
+        help="Server port (default: 7860)"
+    )
+    
+    parser.add_argument(
+        "--video",
+        help="Path to video file to analyze"
+    )
+    
+    parser.add_argument(
+        "--output",
+        help="Output path for funscript file"
+    )
+    
+    parser.add_argument(
+        "--batch",
+        action="store_true",
+        help="Run in batch mode (no GUI)"
+    )
+    
+    parser.add_argument(
+        "--verbose",
+        action="store_true",
+        help="Enable verbose logging"
+    )
+    
+    args = parser.parse_args()
+    
+    # Set up logging
+    if args.verbose:
+        logging.basicConfig(level=logging.DEBUG)
+    else:
+        logging.basicConfig(level=logging.INFO)
+    
+    # Initialize analyzer
     analyzer = VRVideoAnalyzer()
-    analyzer.run(share=False)
+    
+    # Batch mode
+    if args.batch:
+        if not args.video:
+            print("Error: --video is required in batch mode")
+            sys.exit(1)
+        
+        if not args.output:
+            print("Error: --output is required in batch mode")
+            sys.exit(1)
+        
+        print(f"Processing video: {args.video}")
+        
+        # Load video
+        success, message = analyzer.load_video(args.video)
+        if not success:
+            print(f"Error loading video: {message}")
+            sys.exit(1)
+        
+        print(f"Video loaded: {message}")
+        
+        # Process all frames
+        print("Processing frames...")
+        for frame_id in range(analyzer.total_frames):
+            if frame_id % 100 == 0:
+                print(f"Processed {frame_id}/{analyzer.total_frames} frames")
+            analyzer.process_frame(frame_id)
+        
+        print("Analyzing movements...")
+        analysis = analyzer.analyze_movements()
+        
+        if "error" in analysis:
+            print(f"Error in analysis: {analysis['error']}")
+            sys.exit(1)
+        
+        print("Generating funscript...")
+        success, message = analyzer.generate_funscript(args.output)
+        
+        if success:
+            print(f"Funscript generated: {message}")
+            print(f"Output saved to: {args.output}")
+        else:
+            print(f"Error generating funscript: {message}")
+            sys.exit(1)
+    
+    else:
+        # GUI mode
+        print("Starting VR Video Analyzer...")
+        print(f"Web interface will be available at: http://{args.server_name}:{args.server_port}")
+        
+        if args.video:
+            print(f"Pre-loading video: {args.video}")
+            analyzer.load_video(args.video)
+        
+        analyzer.run(
+            share=args.share,
+            server_name=args.server_name,
+            server_port=args.server_port
+        )
+
+if __name__ == "__main__":
+    main()
