@@ -18,3 +18,5 @@ huggingface_hub
 spaces
 cohere
 gradio
+pycuda>=2024.1
+# tensorrt available as NVIDIA wheel matching your CUDA version – install manually.

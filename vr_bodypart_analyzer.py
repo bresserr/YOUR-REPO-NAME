@@ -62,6 +62,9 @@ VR_LAYOUTS = [
 BoundingBox = Tuple[int, int, int, int]  # x1, y1, x2, y2
 DetectionResult = Dict[str, BoundingBox]
 
+# NEW: extra type for per-frame depth (approx. inverse-disparity)
+DepthMap = Dict[str, float]
+
 # --------------------------------------------------------------------------------------
 # DETECTION & TRACKING PLACEHOLDERS
 # --------------------------------------------------------------------------------------
@@ -245,22 +248,70 @@ class VideoSession:
         self.detector = load_detector()
         self.tracker = SimpleTracker()
         self.frame_history: List[DetectionResult] = []
+        self.depth_history: List[DepthMap] = []  # NEW
         self.paused: bool = False
         self.last_frame: np.ndarray | None = None
+        self.fps = self.cap.get(cv2.CAP_PROP_FPS) or 30
 
     # ------------------------------ helpers ---------------------------------
 
-    def _split_frame(self, frame: np.ndarray) -> Tuple[np.ndarray, Tuple[int, int]]:
-        """Return the *left* eye frame and x/y offset so we can map boxes back."""
+    def _split_eyes(self, frame: np.ndarray) -> List[Tuple[np.ndarray, Tuple[int, int]]]:
+        """Return list of eye frames with their x/y offsets inside *frame*."""
         if self.vr_layout == "side-by-side":
             h, w, _ = frame.shape
             half = w // 2
-            return frame[:, :half].copy(), (0, 0)
+            return [
+                (frame[:, :half].copy(), (0, 0)),  # left eye
+                (frame[:, half:].copy(), (half, 0)),  # right eye
+            ]
         elif self.vr_layout == "top-bottom":
             h, w, _ = frame.shape
             half = h // 2
-            return frame[:half, :].copy(), (0, 0)
-        return frame, (0, 0)  # monoscopic
+            return [
+                (frame[:half, :].copy(), (0, 0)),  # left eye
+                (frame[half:, :].copy(), (0, half)),  # right eye
+            ]
+        # monoscopic
+        return [(frame, (0, 0))]
+
+    def _merge_eye_detections(self, eye_results: List[Tuple[DetectionResult, Tuple[int, int]]]) -> Tuple[DetectionResult, DepthMap]:
+        """Combine per-eye detections, estimate depth via disparity."""
+        if len(eye_results) == 1:
+            return eye_results[0][0], {p: 0.0 for p in eye_results[0][0]}
+
+        left_res, (lx, ly) = eye_results[0]
+        right_res, (rx, ry) = eye_results[1]
+
+        merged: DetectionResult = {}
+        depths: DepthMap = {}
+        for part in BODY_PARTS:
+            if part in left_res and part in right_res:
+                l_box = left_res[part]
+                r_box = right_res[part]
+                # Add offsets for global coordinate space
+                l_box_gl = (l_box[0]+lx, l_box[1]+ly, l_box[2]+lx, l_box[3]+ly)
+                r_box_gl = (r_box[0]+rx, r_box[1]+ry, r_box[2]+rx, r_box[3]+ry)
+                # Depth approximation: inverse disparity between x-centres
+                cx_l = (l_box[0] + l_box[2]) / 2.0
+                cx_r = (r_box[0] + r_box[2]) / 2.0
+                disparity = abs(cx_l - cx_r) + 1e-3  # avoid /0
+                depths[part] = 1.0 / disparity  # larger value == closer
+                # Average the boxes for merged view
+                merged[part] = (
+                    int((l_box_gl[0] + r_box_gl[0]) / 2),
+                    int((l_box_gl[1] + r_box_gl[1]) / 2),
+                    int((l_box_gl[2] + r_box_gl[2]) / 2),
+                    int((l_box_gl[3] + r_box_gl[3]) / 2),
+                )
+            elif part in left_res:
+                merged[part] = left_res[part]
+                depths[part] = 0.0
+            elif part in right_res:
+                # shift right box to global coords for consistency
+                rb = right_res[part]
+                merged[part] = (rb[0]+rx, rb[1]+ry, rb[2]+rx, rb[3]+ry)
+                depths[part] = 0.0
+        return merged, depths
 
     def pause(self):
         self.paused = True
@@ -290,11 +341,10 @@ class VideoSession:
     # -------------------------- frame generator -----------------------------
 
     def read_frames(self):
-        fps = self.cap.get(cv2.CAP_PROP_FPS) or 30
-        delay = 1 / fps
+        delay = 1 / self.fps
+        frame_idx = 0
         while True:
             if self.paused:
-                # When paused keep yielding the last processed frame
                 if self.last_frame is not None:
                     yield draw_boxes(self.last_frame.copy(), self.frame_history[-1]), delay
                 time.sleep(delay)
@@ -304,14 +354,21 @@ class VideoSession:
             if not ret:
                 break
 
-            # Handle VR layout – we detect only on left eye for demo simplicity
-            proc_frame, (ox, oy) = self._split_frame(frame)
-            detections = detect_body_parts(self.detector, proc_frame)
-            # Optionally map boxes back if needed – offsets are currently zero
-            tracked = self.tracker.update(detections)
+            eye_frames = self._split_eyes(frame)
+            eye_detections = []
+            for eye_frame, _ in eye_frames:
+                det = detect_body_parts(self.detector, eye_frame)
+                eye_detections.append((det, _))
+
+            merged_boxes, depth_map = self._merge_eye_detections(eye_detections)
+            tracked = self.tracker.update(merged_boxes)
+
             self.frame_history.append(tracked)
-            self.last_frame = proc_frame
-            yield draw_boxes(proc_frame.copy(), tracked), delay
+            self.depth_history.append(depth_map)
+            self.last_frame = eye_frames[0][0]  # show left eye
+
+            yield draw_boxes(self.last_frame.copy(), tracked), delay
+            frame_idx += 1
 
         self.cap.release()
 
@@ -325,11 +382,68 @@ class VideoSession:
             time.sleep(delay)
 
     def export(self):
-        actions = analyse_interactions(self.frame_history)
+        actions = analyse_interactions(self.frame_history, self.depth_history, self.fps)
         export_path = Path("outputs") / f"session-{uuid.uuid4().hex[:8]}.funscript"
         export_path.parent.mkdir(exist_ok=True, parents=True)
         write_funscript(actions, export_path)
         return str(export_path)
+
+
+# --------------------------------------------------------------------------------------
+# INTERACTION ANALYSIS (Enhanced)
+# --------------------------------------------------------------------------------------
+
+
+def analyse_interactions(traj_boxes: List[DetectionResult], traj_depth: List[DepthMap], fps: float) -> List[Dict[str, int]]:
+    """Produce advanced Handy *.funscript* actions using speed & depth.
+
+    *pos* encodes penetration depth (derived from stereo disparity) while rapid
+    changes generate denser action points to reflect higher speed.
+    """
+    if not traj_boxes:
+        return []
+
+    actions: List[Dict[str, int]] = []
+    prev_pos = None
+    prev_time = 0
+
+    # compute max depth to normalise
+    max_depth = max((depth.get("penis", 0.0) for depth in traj_depth), default=1.0)
+    max_depth = max(max_depth, 1e-3)
+
+    for idx, (boxes, depth) in enumerate(zip(traj_boxes, traj_depth)):
+        if "penis" not in boxes:
+            continue
+
+        # depth-based position (0-100)
+        depth_norm = depth.get("penis", 0.0) / max_depth
+        pos = int(max(0, min(100, depth_norm * 100)))
+
+        # speed calculation – vertical movement on screen
+        _, y1, _, y2 = boxes["penis"]
+        cy = (y1 + y2) / 2.0
+        if idx > 0 and "penis" in traj_boxes[idx - 1]:
+            _, py1, _, py2 = traj_boxes[idx - 1]["penis"]
+            pcy = (py1 + py2) / 2.0
+            speed_px_per_s = abs(cy - pcy) * fps
+            # Insert extra action points for very high speed to replicate strokes
+            if speed_px_per_s > 100:  # heuristic threshold
+                mid_time = int((idx - 0.5) * (1000 / fps))
+                mid_pos = (pos + (prev_pos if prev_pos is not None else pos)) // 2
+                if prev_pos != mid_pos:
+                    actions.append({"at": mid_time, "pos": mid_pos})
+
+        timestamp = int(idx * (1000 / fps))
+        if pos != prev_pos:
+            actions.append({"at": timestamp, "pos": pos})
+            prev_pos = pos
+            prev_time = timestamp
+
+    # Ensure last action at end
+    if actions and actions[-1]["at"] != prev_time:
+        actions.append({"at": prev_time, "pos": prev_pos or 0})
+
+    return actions
 
 
 # --------------------------------------------------------------------------------------
