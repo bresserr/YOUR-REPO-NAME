@@ -1,0 +1,166 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>VR Body Tracker - Funscript Generator</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>VR Body Tracker</h1>
+            <p>3D VR Video Analysis & Funscript Generator</p>
+        </header>
+
+        <div class="upload-section">
+            <div class="upload-area" id="uploadArea">
+                <svg class="upload-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor">
+                    <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+                    <polyline points="7 10 12 15 17 10"></polyline>
+                    <line x1="12" y1="15" x2="12" y2="3"></line>
+                </svg>
+                <p>Drop VR video here or click to upload</p>
+                <input type="file" id="fileInput" accept="video/*" hidden>
+            </div>
+            
+            <div class="video-info" id="videoInfo" style="display: none;">
+                <h3>Video Information</h3>
+                <p>Filename: <span id="videoFilename"></span></p>
+                <p>Duration: <span id="videoDuration"></span>s</p>
+                <p>FPS: <span id="videoFPS"></span></p>
+                <p>Total Frames: <span id="videoFrames"></span></p>
+            </div>
+        </div>
+
+        <div class="preview-section" id="previewSection" style="display: none;">
+            <div class="video-container">
+                <canvas id="videoCanvas"></canvas>
+                <div class="overlay-controls">
+                    <button class="correction-btn" id="correctionMode">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor">
+                            <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"></path>
+                            <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"></path>
+                        </svg>
+                        Correction Mode
+                    </button>
+                </div>
+            </div>
+
+            <div class="controls">
+                <div class="playback-controls">
+                    <button id="playBtn" class="control-btn">
+                        <svg viewBox="0 0 24 24" fill="currentColor">
+                            <polygon points="5 3 19 12 5 21 5 3"></polygon>
+                        </svg>
+                    </button>
+                    <button id="pauseBtn" class="control-btn" style="display: none;">
+                        <svg viewBox="0 0 24 24" fill="currentColor">
+                            <rect x="6" y="4" width="4" height="16"></rect>
+                            <rect x="14" y="4" width="4" height="16"></rect>
+                        </svg>
+                    </button>
+                    <div class="progress-container">
+                        <input type="range" id="progressBar" min="0" max="100" value="0">
+                        <div class="time-display">
+                            <span id="currentTime">0:00</span> / <span id="totalTime">0:00</span>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="body-parts-legend">
+                    <h3>Body Parts</h3>
+                    <div class="legend-items">
+                        <div class="legend-item">
+                            <div class="color-box" style="background-color: #ff0000;"></div>
+                            <span>Head</span>
+                        </div>
+                        <div class="legend-item">
+                            <div class="color-box" style="background-color: #ff6464;"></div>
+                            <span>Mouth</span>
+                        </div>
+                        <div class="legend-item">
+                            <div class="color-box" style="background-color: #00ff00;"></div>
+                            <span>Hands</span>
+                        </div>
+                        <div class="legend-item">
+                            <div class="color-box" style="background-color: #ff00ff;"></div>
+                            <span>Breasts</span>
+                        </div>
+                        <div class="legend-item">
+                            <div class="color-box" style="background-color: #0000ff;"></div>
+                            <span>Pelvis</span>
+                        </div>
+                        <div class="legend-item">
+                            <div class="color-box" style="background-color: #ffff00;"></div>
+                            <span>Genitals</span>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="analysis-section">
+                <h3>Analysis & Generation</h3>
+                <div class="analysis-controls">
+                    <button id="startAnalysis" class="primary-btn">Start Analysis</button>
+                    <div class="progress-info" id="analysisProgress" style="display: none;">
+                        <div class="progress-bar">
+                            <div class="progress-fill" id="progressFill"></div>
+                        </div>
+                        <p>Processing: <span id="progressPercent">0</span>%</p>
+                    </div>
+                </div>
+
+                <div class="interaction-stats" id="interactionStats" style="display: none;">
+                    <h4>Detected Interactions</h4>
+                    <div id="interactionList"></div>
+                </div>
+
+                <div class="funscript-controls" id="funscriptControls" style="display: none;">
+                    <h4>Funscript Generation</h4>
+                    <div class="generation-options">
+                        <label>
+                            <input type="checkbox" id="smoothingEnabled" checked>
+                            Enable Smoothing
+                        </label>
+                        <label>
+                            Pattern Type:
+                            <select id="patternType">
+                                <option value="auto">Auto-detect</option>
+                                <option value="stroke">Stroke</option>
+                                <option value="vibrate">Vibrate</option>
+                                <option value="edge">Edge</option>
+                            </select>
+                        </label>
+                    </div>
+                    <button id="generateFunscript" class="primary-btn">Generate Funscript</button>
+                    <div id="downloadSection" style="display: none;">
+                        <a id="downloadLink" class="download-btn" download>Download Funscript</a>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Correction Modal -->
+        <div class="modal" id="correctionModal" style="display: none;">
+            <div class="modal-content">
+                <h3>Correct Body Part Position</h3>
+                <p>Select body part to correct:</p>
+                <select id="bodyPartSelect">
+                    <option value="head">Head</option>
+                    <option value="mouth">Mouth</option>
+                    <option value="hand_left">Left Hand</option>
+                    <option value="hand_right">Right Hand</option>
+                    <option value="breasts">Breasts</option>
+                    <option value="pelvis">Pelvis</option>
+                    <option value="genitals">Genitals</option>
+                </select>
+                <p>Click on the video to set new position</p>
+                <button id="cancelCorrection" class="secondary-btn">Cancel</button>
+            </div>
+        </div>
+    </div>
+
+    <script src="app.js"></script>
+</body>
+</html>

@@ -1,0 +1,109 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Virtual Environment
+venv/
+ENV/
+env/
+.venv/
+
+# IDE
+.vscode/*
+!.vscode/settings.json
+!.vscode/tasks.json
+!.vscode/launch.json
+!.vscode/extensions.json
+!.vscode/README.md
+.idea/
+*.swp
+*.swo
+*~
+
+# Environment variables
+.env
+.env.local
+.env.*.local
+
+# Output files
+output/
+*.funscript
+temp/
+
+# Video files (too large for git)
+*.mp4
+*.avi
+*.mov
+*.mkv
+*.webm
+*.flv
+*.wmv
+
+# Model files
+*.onnx
+*.trt
+*.engine
+*.pth
+*.h5
+*.pb
+models/
+
+# Logs
+*.log
+logs/
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+.nox/
+.hypothesis/
+
+# Documentation
+docs/_build/
+site/
+
+# Jupyter
+.ipynb_checkpoints
+*.ipynb
+
+# CUDA/TensorRT
+*.cubin
+*.ptx
+*.fatbin
+
+# Temporary files
+*.tmp
+*.temp
+*.cache
+
+# Profiling
+*.prof
+*.svg
+profile_output/
